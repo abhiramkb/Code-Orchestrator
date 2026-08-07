@@ -10,7 +10,9 @@ The documentation below is also generated using Gemini. Use with caution (althou
 
 ## `orchestrator.py`
 
-`orchestrator.py` parses a JSON configuration file, resolves parameter spaces, and generates self-contained Bash submission scripts (`.sh`) configured with SLURM `#SBATCH` directives, environment module loads, environment variable exports, execution timing, and tagged `stdout`/`stderr` line prefixing.
+`orchestrator.py` parses a JSON configuration file, performs pre-flight schema and file existence checks, resolves parameter spaces, and generates self-contained Bash submission scripts (`.sh`).
+
+For multi-dimensional parameter scans, it generates a single **SLURM Job Array** submission script (`submit_array.sh`) using embedded Bash parameter arrays and `$SLURM_ARRAY_TASK_ID` dynamic mapping.
 
 ### Command-Line Usage
 
@@ -27,35 +29,41 @@ python3 orchestrator.py --help
 
 ### Script Execution Flow
 1. **Load Config:** Reads the target JSON configuration file.
-2. **Determine Mode:** Evaluates `loopQ` setting to select **Single Run**, **Inner-Loop Only**, or **Full Scan** mode.
-3. **Environment Setup:** Generates `module load` statements and `export` statements for environment variables.
-4. **Script Generation:** Constructs the bash submission script(s) with embedded execution timing and `sed`-based output stream prefixing (`[..._out]` and `[..._err]`).
-5. **Output:** Writes submission script files (`submit_single.sh`, `submit_inner.sh`, or `submit_O<idx>.sh`).
+2. **Pre-Flight Validation:**
+   * Validates required sections (`execution`, `slurm`, `inner_loop`).
+   * Validates data types for flags, environment variables, modules, and arguments.
+   * Asserts existence of all referenced inner-loop input files (`file_path` or `inner_files` mappings) on disk prior to script generation.
+3. **Determine Output Mode:**
+   * **Single Run Mode** (`loopQ: false`): Writes `submit_single.sh`.
+   * **Inner-Loop Only Mode** (`loopQ: true`, no `outer_loops`): Writes `submit_inner.sh`.
+   * **Job Array Mode** (`loopQ: true`, with `outer_loops`): Calculates Cartesian product combinations and writes a unified `submit_array.sh`.
+4. **Script Generation:** Embeds timing metrics (`date +%s%N`), environment variable exports, module loads, and `sed`-based output prefixing (`[A<task>_L<line>_out]` / `[A<task>_L<line>_err]`).
 
 ---
 
 ## Configuration Schema (`config.json`)
 
-The input JSON file controls execution behavior, resource allocation, and parameter space expansion.
+The input JSON file controls execution behavior, resource allocation, schema constraints, and parameter space expansion.
 
 ### Schema Fields
 
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `loopQ` | Boolean | Optional | Set to `false` for a single execution pass. Set to `true` (or omit) for looped sweeps. |
-| `execution` | Object | **Yes** | Defines language binary, executable script, execution flags, modules, and environment variables. |
-| `slurm` | Object | **Yes** | Key-value pairs translated directly into `#SBATCH --<key>=<value>` directives. |
+| `loopQ` | Boolean | Optional | Set to `false` for single execution pass. Defaults to `true` for parameter scans. |
+| `execution` | Object | **Yes** | Language binary, executable, flags, modules, and environment variables. |
+| `slurm` | Object | **Yes** | Key-value pairs translated into `#SBATCH --<key>=<value>` directives. |
+| `slurm.max_concurrent_tasks` | Integer | Optional | Throttles maximum active array tasks on the cluster (e.g., `#SBATCH --array=0-7%2`). |
 | `inner_loop` | Object | Conditional | Required if `loopQ: true`. Specifies kinematic data source and CLI argument mapping. |
-| `outer_loops` | Array | Optional | Used in `loopQ: true` mode for multidimensional sweeps over parameter lists. |
-| `args` | Object | Conditional | Required if `loopQ: false`. Command-line arguments for a single run. |
+| `outer_loops` | Array | Optional | Used in `loopQ: true` mode for multidimensional sweeps converted to Job Arrays. |
+| `args` | Object | Conditional | Required if `loopQ: false`. Command-line key-value pairs for a single run. |
 
 ---
 
 ## Configuration Modes & Examples
 
-### Case 1: Full Parameter Scan (Outer + Inner Loops)
+### Case 1: Full Parameter Scan (SLURM Job Array Mode)
 
-Used when scanning across multiple outer-loop parameters (e.g., dipole fits, scales) while looping over space-separated kinematic points from a file in the inner loop.
+Used when scanning across multiple outer-loop parameters while reading space-separated kinematic data points from dynamic or static inner-loop files.
 
 ```json
 {
@@ -76,7 +84,8 @@ Used when scanning across multiple outer-loop parameters (e.g., dipole fits, sca
     "nodes": 1,
     "cpus-per-task": 4,
     "time": "02:00:00",
-    "output": "slurm_%j.log"
+    "output": "slurm_%A_%a.log",
+    "max_concurrent_tasks": 2
   },
   "inner_loop": {
     "file_path": null,
@@ -100,14 +109,15 @@ Used when scanning across multiple outer-loop parameters (e.g., dipole fits, sca
 }
 ```
 
-* **Behavior:** Generates `submit_O0.sh`, `submit_O1.sh`, etc., for every Cartesian product combination of `outer_loops`.
-* **File Resolution:** Because `inner_loop.file_path` is `null`, it retrieves the file from `inner_files` corresponding to the current `dipole_fit` value.
+* **Output File:** `submit_array.sh`
+* **Generated Header:** `#SBATCH --array=0-3%2`
+* **Behavior:** Maps outer combinations into Bash parameter arrays (`OUTER_ARGS`, `TARGET_FILES`). The array task index (`$SLURM_ARRAY_TASK_ID`) dynamically selects parameter arguments and target data files at runtime.
 
 ---
 
-### Case 2: Inner Loop Only (No Outer Loops)
+### Case 2: Inner Loop Only (Single Script Scan)
 
-Used when executing a parameter sweep over a single file without any outer-loop parameters.
+Used when running a 1D sweep over a single file without outer-loop parameters.
 
 ```json
 {
@@ -134,14 +144,14 @@ Used when executing a parameter sweep over a single file without any outer-loop 
 }
 ```
 
-* **Behavior:** Generates a single `submit_inner.sh` script.
-* **Log Prefix Format:** Output tags drop the `O<idx>` prefix and format directly as `[L1_out]`, `[L2_out]`, etc.
+* **Output File:** `submit_inner.sh`
+* **Log Prefix Format:** `[L1_out]`, `[L2_out]`, etc.
 
 ---
 
 ### Case 3: Single Run (`loopQ: false`)
 
-Used to run the executable once with a static set of parameters without reading external data files.
+Used to run the executable once with a static set of CLI arguments without external data files.
 
 ```json
 {
@@ -171,28 +181,29 @@ Used to run the executable once with a static set of parameters without reading 
 }
 ```
 
-* **Behavior:** Generates `submit_single.sh`.
-* **Log Prefix Format:** Log lines are tagged with `[SINGLE_out]` and `[SINGLE_err]`.
+* **Output File:** `submit_single.sh`
+* **Log Prefix Format:** `[SINGLE_out]` and `[SINGLE_err]`.
 
 ---
 
-## Log Output & Legend Tracking
+## Log Output & Stream Tagging
 
-Every generated script prints a **Run Legend** at the top of the SLURM output log, followed by real-time prefixed execution streams and timing metrics:
+Generated scripts print an explicit run legend at execution start, followed by real-time stream tagging and nano-second precision job timing:
 
 ```text
-======================= SLURM RUN LEGEND =======================
+======================= SLURM ARRAY RUN LEGEND =======================
+Array Task ID: 0
 Outer Loop Combo: dipole_fit=gbw, scale=0.5
 Outer Flags: --dipole_fit gbw --scale 0.5
 Inner Loop Source File: data/kinematics_gbw.txt
 Inner Args: x, Q2
-================================================================
-[O0_L1_out] Job started at: Fri Aug  7 14:00:00 EEST 2026
-[O0_L1_out] Running point x=0.0001 Q2=1.0...
-[O0_L1_out] Job finished at: Fri Aug  7 14:00:02 EEST 2026
-[O0_L1_out] Job duration: 2.104 seconds
-[O0_L2_out] Job started at: Fri Aug  7 14:00:02 EEST 2026
-[O0_L2_err] Warning: Approach limit reached.
-[O0_L2_out] Job finished at: Fri Aug  7 14:00:04 EEST 2026
-[O0_L2_out] Job duration: 1.980 seconds
+======================================================================
+[A0_L1_out] Job started at: Fri Aug  7 14:00:00 EEST 2026
+[A0_L1_out] Running point x=0.0001 Q2=1.0...
+[A0_L1_out] Job finished at: Fri Aug  7 14:00:02 EEST 2026
+[A0_L1_out] Job duration: 2.104 seconds
+[A0_L2_out] Job started at: Fri Aug  7 14:00:02 EEST 2026
+[A0_L2_err] Warning: Convergence threshold near limit.
+[A0_L2_out] Job finished at: Fri Aug  7 14:00:04 EEST 2026
+[A0_L2_out] Job duration: 1.980 seconds
 ```
