@@ -1,8 +1,7 @@
 import json
-import sys
 import itertools
-import subprocess
 import argparse
+import sys
 from pathlib import Path
 
 def validate_config(cfg: dict, config_path: str):
@@ -54,12 +53,10 @@ def validate_config(cfg: dict, config_path: str):
             target_inner_file = inner_cfg.get("file_path")
 
             if target_inner_file:
-                # Direct file path check
                 p = Path(target_inner_file)
-                if not p.is_file():
-                    errors.append(f"Specified 'inner_loop.file_path' does not exist: '{target_inner_file}'")
+                #if not p.is_file():
+                #    errors.append(f"Specified 'inner_loop.file_path' does not exist: '{target_inner_file}'")
             elif outer_cfg:
-                # Dynamic mapping check across outer loops
                 file_mapped = False
                 for idx, o_loop in enumerate(outer_cfg):
                     if isinstance(o_loop, dict) and "inner_files" in o_loop:
@@ -69,8 +66,8 @@ def validate_config(cfg: dict, config_path: str):
                             errors.append(f"'outer_loops[{idx}].inner_files' must be an object.")
                             continue
                         #for val, fpath in inner_files_map.items():
-                        #    if not Path(fpath).is_file():
-                        #        errors.append(f"Referenced inner loop file not found: '{fpath}' (for value '{val}')")
+                            #if not Path(fpath).is_file():
+                            #    errors.append(f"Referenced inner loop file not found: '{fpath}' (for value '{val}')")
                 if not file_mapped:
                     errors.append("No 'file_path' provided in 'inner_loop' and no 'inner_files' mappings found in 'outer_loops'.")
             else:
@@ -81,6 +78,7 @@ def validate_config(cfg: dict, config_path: str):
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
+
 
 def generate_slurm_script(config_path):
     config_file = Path(config_path)
@@ -99,27 +97,30 @@ def generate_slurm_script(config_path):
     validate_config(cfg, config_path)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
-    # Determine execution mode (defaults to True if omitted)
     loop_q = bool(cfg.get("loopQ", True))
-
     exec_cfg = cfg["execution"]
-    slurm_cfg = cfg["slurm"]
+    slurm_cfg = cfg["slurm"].copy()
 
-    # 1. Environment Modules Block
+    # Extract job array throttling if provided
+    max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
+
+    # Build SLURM header options
+    slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_cfg.items())
+
+    # Environment block setup
     modules = exec_cfg.get("modules", [])
     module_load_block = (
         "\n# Load Required Environment Modules\n" + "\n".join(f"module load {m}" for m in modules)
         if modules else "# No environment modules specified"
     )
 
-    # 2. Environment Variables Block
     env_vars = exec_cfg.get("env_vars", {})
     env_var_block = (
         "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
         if env_vars else "# No environment variables specified"
     )
 
-    slurm_header = "".join(f'#SBATCH --{k}={v}' + chr(10) for k, v in slurm_cfg.items())
+    flags_str = " ".join(exec_cfg.get("flags", []))
 
     # =========================================================================
     # SINGLE RUN MODE (loopQ == False)
@@ -127,7 +128,7 @@ def generate_slurm_script(config_path):
     if not loop_q:
         args_cfg = cfg.get("args", {})
         args_str = " ".join(f"--{k} {v}" for k, v in args_cfg.items())
-        exec_cmd = f"{exec_cfg['language']} {' '.join(exec_cfg['flags'])} {exec_cfg['executable']} {args_str}".strip()
+        exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} {args_str}".strip()
 
         script_content = f"""#!/bin/bash
 {slurm_header}
@@ -157,54 +158,17 @@ echo "================================================================"
         script_file = Path("submit_single.sh")
         script_file.write_text(script_content)
         print(f"Generated single-run SLURM script: {script_file}")
-        
-        # res = subprocess.run(["sbatch", str(script_file)], capture_output=True, text=True)
-        # print(f"Submitted single run job: {res.stdout.strip()}")
         return
 
     # =========================================================================
-    # LOOP / PARAMETER SCAN MODE (loopQ == True)
+    # INNER LOOP ONLY MODE (loopQ == True, outer_loops empty/omitted)
     # =========================================================================
     inner_cfg = cfg["inner_loop"]
     outer_cfg = cfg.get("outer_loops", [])
 
-    # Check if outer loops are provided
-    if outer_cfg:
-        outer_keys = [item["arg_name"] for item in outer_cfg]
-        outer_val_lists = [item["values"] for item in outer_cfg]
-        outer_combinations = list(itertools.product(*outer_val_lists))
-    else:
-        outer_keys = []
-        outer_combinations = [()]  # Single iteration pass when no outer loops exist
-
-    for o_idx, combo in enumerate(outer_combinations):
-        if outer_keys:
-            combo_dict = dict(zip(outer_keys, combo))
-            outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
-            outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
-            indicator_prefix = f"O{o_idx}_"
-            script_filename = f"submit_O{o_idx}.sh"
-        else:
-            combo_dict = {}
-            outer_args_str = ""
-            outer_desc = "None"
-            indicator_prefix = ""
-            script_filename = "submit_inner.sh"
-        
-        # --- File Resolution Logic ---
-        target_inner_file = inner_cfg.get("file_path")
-
-        if not target_inner_file and outer_cfg:
-            for loop_cfg in outer_cfg:
-                arg_name = loop_cfg["arg_name"]
-                val = combo_dict.get(arg_name)
-                if "inner_files" in loop_cfg and val in loop_cfg["inner_files"]:
-                    target_inner_file = loop_cfg["inner_files"][val]
-                    break
-
-        if not target_inner_file:
-            print(f"[ERROR] No inner loop file provided for combo: {outer_desc}.")
-            continue
+    if not outer_cfg:
+        target_inner_file = inner_cfg["file_path"]
+        exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
 
         script_content = f"""#!/bin/bash
 {slurm_header}
@@ -212,8 +176,7 @@ echo "================================================================"
 {env_var_block}
 
 echo "======================= SLURM RUN LEGEND ======================="
-echo "Outer Loop Combo: {outer_desc}"
-echo "Outer Flags: {outer_args_str if outer_args_str else 'None'}"
+echo "Mode: Inner Loop Only"
 echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
 echo "================================================================"
@@ -226,12 +189,8 @@ while read -r line || [ -n "$line" ]; do
     read -r -a inner_vals <<< "$line"
     inner_args_str=""
 """
-
         for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
             script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
-
-        indicator = f"{indicator_prefix}L${{line_no}}"
-        exec_cmd = f"{exec_cfg['language']} {' '.join(exec_cfg['flags'])} {exec_cfg['executable']} {outer_args_str} $inner_args_str".strip()
 
         script_content += f"""
     {{
@@ -247,17 +206,125 @@ while read -r line || [ -n "$line" ]; do
         sec=$(( elapsedtime / 1000000000 ))
         msec=$(( (elapsedtime % 1000000000) / 1000000 ))
         printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
-    }} > >(sed "s/^/[{indicator}_out] /") 2> >(sed "s/^/[{indicator}_err] /" >&2)
+    }} > >(sed "s/^/[L${{line_no}}_out] /") 2> >(sed "s/^/[L${{line_no}}_err] /" >&2)
 
 done < "{target_inner_file}"
 """
-
-        script_file = Path(script_filename)
+        script_file = Path("submit_inner.sh")
         script_file.write_text(script_content)
-        print(f"Generated SLURM script: {script_file}")
+        print(f"Generated inner-loop SLURM script: {script_file}")
+        return
+
+    # =========================================================================
+    # JOB ARRAY MODE (loopQ == True with outer_loops)
+    # =========================================================================
+    outer_keys = [item["arg_name"] for item in outer_cfg]
+    outer_val_lists = [item["values"] for item in outer_cfg]
+    outer_combinations = list(itertools.product(*outer_val_lists))
+    total_tasks = len(outer_combinations)
+
+    array_range = f"0-{total_tasks - 1}"
+    if max_concurrent:
+        array_range += f"%{max_concurrent}"
+
+    array_header = f"#SBATCH --array={array_range}\n"
+
+    bash_outer_args = []
+    bash_outer_descs = []
+    bash_target_files = []
+
+    for combo in outer_combinations:
+        combo_dict = dict(zip(outer_keys, combo))
+        outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
+        outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
         
-        # res = subprocess.run(["sbatch", str(script_file)], capture_output=True, text=True)
-        # print(f"Submitted job using '{target_inner_file}': {res.stdout.strip()}")
+        target_inner_file = inner_cfg.get("file_path")
+        if not target_inner_file and outer_cfg:
+            for loop_cfg in outer_cfg:
+                arg_name = loop_cfg["arg_name"]
+                val = combo_dict.get(arg_name)
+                if "inner_files" in loop_cfg and val in loop_cfg["inner_files"]:
+                    target_inner_file = loop_cfg["inner_files"][val]
+                    break
+
+        bash_outer_args.append(f'    "{outer_args_str}"')
+        bash_outer_descs.append(f'    "{outer_desc}"')
+        bash_target_files.append(f'    "{target_inner_file}"')
+
+    args_array_block = "\n".join(bash_outer_args)
+    descs_array_block = "\n".join(bash_outer_descs)
+    files_array_block = "\n".join(bash_target_files)
+
+    exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $outer_args_str $inner_args_str".strip()
+
+    script_content = f"""#!/bin/bash
+{slurm_header}{array_header}
+{module_load_block}
+{env_var_block}
+
+# Parameter mapping arrays built by orchestrator.py
+OUTER_ARGS=(
+{args_array_block}
+)
+
+OUTER_DESCS=(
+{descs_array_block}
+)
+
+TARGET_FILES=(
+{files_array_block}
+)
+
+# Safe task ID resolution (defaults to 0 if executed manually outside SLURM)
+TASK_ID=${{SLURM_ARRAY_TASK_ID:-0}}
+
+outer_args_str="${{OUTER_ARGS[$TASK_ID]}}"
+outer_desc="${{OUTER_DESCS[$TASK_ID]}}"
+target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
+
+echo "======================= SLURM ARRAY RUN LEGEND ======================="
+echo "Array Task ID: $TASK_ID"
+echo "Outer Loop Combo: $outer_desc"
+echo "Outer Flags: $outer_args_str"
+echo "Inner Loop Source File: $target_inner_file"
+echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
+echo "======================================================================"
+
+line_no=0
+while read -r line || [ -n "$line" ]; do
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    ((line_no++))
+
+    read -r -a inner_vals <<< "$line"
+    inner_args_str=""
+"""
+    for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
+        script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
+
+    indicator = "A${TASK_ID}_L${line_no}"
+
+    script_content += f"""
+    {{
+        starttime=$(date +%s%N)
+        echo "Job started at: $(date)"
+        
+        eval "{exec_cmd}"
+        
+        endtime=$(date +%s%N)
+        echo "Job finished at: $(date)"
+        
+        elapsedtime=$((endtime - starttime))
+        sec=$(( elapsedtime / 1000000000 ))
+        msec=$(( (elapsedtime % 1000000000) / 1000000 ))
+        printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
+    }} > >(sed "s/^/[{indicator}_out] /") 2> >(sed "s/^/[{indicator}_err] /" >&2)
+
+done < "$target_inner_file"
+"""
+
+    script_file = Path("submit_array.sh")
+    script_file.write_text(script_content)
+    print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate SLURM submission scripts from a JSON configuration file.")
