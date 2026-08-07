@@ -2,6 +2,10 @@
 
 An automated framework for generating and submitting SLURM batch scripts for scientific compute codes, supporting single runs, 1D parameter loops, and multi-dimensional outer/inner parameter scans.
 
+Code conceptualized by me (Abhiram Kaushik) but implemented using the Gemini LLM. Permalink to the chat [here](https://share.gemini.google/WEDBVBqp6mVB)
+
+The documentation below is also generated using Gemini. Use with caution (although I will get around to checking it later).
+
 ---
 
 ## `orchestrator.py`
