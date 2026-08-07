@@ -1,0 +1,49 @@
+{
+  "loopQ": true,
+  "execution": {
+    "language": "julia",
+    "executable": "demo.py",
+    "flags": ["-u"],
+    "modules": [
+      "gcc/11.2.0",
+      "gsl/2.7",
+      "python/3.10"
+    ],
+    "env_vars": {
+      "JULIA_NUM_THREADS": "$SLURM_CPUS_PER_TASK",
+      "OMP_NUM_THREADS": "4"
+    }
+  },
+  "slurm": {
+    "account": "lappi",
+    "job-name": "test_orchestrator",
+    "partition": "test",
+    "nodes": 1,
+    "ntasks": 1,
+    "time": "00:15:00",
+    "cpus-per-task": 8,
+    "output": "slurm_%j.log"
+  },
+  "inner_loop": {
+    "file_path": null,
+    "delimiter": " ",
+    "arg_names": ["x", "Q2"]
+  },
+  "outer_loops": [
+    {
+      "arg_name": "dipole_fit",
+      "values": ["fit_gbw.dat", "fit_mv.dat"],
+      "inner_files": {"fit_gbw.dat":"kinematics_gbw.txt","fit_mv.dat":"kinematics_mv.txt"}
+    },
+    {
+      "arg_name": "scale",
+      "values": [0.5, 1.0, 2.0]
+    }
+  ],
+  "args": {
+    "dipole_fit": "gbw",
+    "scale": 0.5,
+    "x": 0.0001,
+    "Q2": 1.0
+  }
+}
