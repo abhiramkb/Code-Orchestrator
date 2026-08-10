@@ -203,7 +203,7 @@ mkdir -p "$CHECKPOINT_DIR"
               formatted_val = formatted_val.replace("{save_dir}", "${SAVE_DIR}")
               formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
                   
-              arg_components.append(f'--{key} \\"{formatted_val}\\"')
+              arg_components.append(f'"--{key}" "{formatted_val}"')
 
         tracking_args_str = " ".join(arg_components)
 
@@ -218,7 +218,7 @@ mkdir -p "$CHECKPOINT_DIR"
 export CHECKPOINT_DIR="./checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 """
-        exp_args_block = '\n    exp_args=""'
+        exp_args_block = '\n    exp_args=()'
 
     # Extract job array throttling if provided
     max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
@@ -276,7 +276,7 @@ indicator="SINGLE"
     starttime=$(date +%s%N)
     echo "Job started at: $(date)"
     
-    eval "{exec_cmd} $exp_args"
+    {exec_cmd} "${{exp_args[@]}}"
     EXIT_CODE=$?
     
     endtime=$(date +%s%N)
@@ -351,7 +351,7 @@ while read -r line || [ -n "$line" ]; do
         starttime=$(date +%s%N)
         echo "Job started at: $(date)"
         
-        eval "{exec_cmd} $exp_args"
+        {exec_cmd} "${{exp_args[@]}}"
         EXIT_CODE=$?
         
         endtime=$(date +%s%N)
@@ -480,7 +480,7 @@ while read -r line || [ -n "$line" ]; do
         starttime=$(date +%s%N)
         echo "Job started at: $(date)"
         
-        eval "{exec_cmd} $exp_args"
+        {exec_cmd} "${{exp_args[@]}}"
         EXIT_CODE=$?
         
         endtime=$(date +%s%N)
