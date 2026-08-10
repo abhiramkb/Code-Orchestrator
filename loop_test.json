@@ -1,0 +1,26 @@
+{
+  "loopQ": true,
+  "execution": {
+    "language": "python",
+    "executable": "print_args.py",
+    "modules": ["python-data"],
+    "env_vars": {}
+  },
+  "experiment": {
+    "result_database_path": "/projappl/lappi/abhiram/Code-Orchestrator/test_db",
+    "experiment_name": "loop_test",
+    "slrm_output_dir": "SLURM_OUTPUT"
+  },
+  "slurm": {
+    "job-name": "test_loop",
+    "partition": "test",
+    "nodes": 1,
+    "time": "00:15:00",
+    "output": "slurm_%j.log"
+  },
+  "inner_loop": {
+    "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_lowQ_smallx.txt",
+    "delimiter": " ",
+    "arg_names": ["Q", "beta", "x"]
+  }
+}
