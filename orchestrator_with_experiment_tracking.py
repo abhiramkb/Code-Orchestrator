@@ -178,16 +178,13 @@ fi
         arg_components = []
         if tracking_args is not None:
           for key, val_template in tracking_args.items():
-              # Substitute python-level static template parameters
-              #formatted_val = val_template.format(experiment_name=exp_name)
-                  
+              formatted_val = val_template 
               # Translate placeholder keywords to bash variable syntaxes
               formatted_val = formatted_val.replace("{result_database_path}", "${RESULT_DATABASE_PATH}")  
               formatted_val = formatted_val.replace("{experiment_name}", "${EXPERIMENT_NAME}")
               formatted_val = formatted_val.replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
-              formatted_val = formatted_val.replace("{save_dir}", "$SAVE_DIR")
+              formatted_val = formatted_val.replace("{save_dir}", "${SAVE_DIR}")
               formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
-              formatted_val = formatted_val.replace("{indicator}", "${indicator}")
                   
               arg_components.append(f'--{key} \\"{formatted_val}\\"')
 
