@@ -292,7 +292,9 @@ indicator="SINGLE"
     printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
 }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 """
-        script_file = Path("submit_single.sh")
+        #script_file = Path("submit_single.sh")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_file = Path(f"submit_single_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
         print(f"Generated single-run SLURM script: {script_file}")
         return script_file
@@ -369,7 +371,9 @@ while read -r line || [ -n "$line" ]; do
 
 done < "{target_inner_file}"
 """
-        script_file = Path("submit_inner.sh")
+        #script_file = Path("submit_inner.sh")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_file = Path(f"submit_inner_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
         print(f"Generated inner-loop SLURM script: {script_file}")
         return script_file
@@ -499,7 +503,9 @@ while read -r line || [ -n "$line" ]; do
 done < "$target_inner_file"
 """
 
-    script_file = Path("submit_array.sh")
+    #script_file = Path("submit_array.sh")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    script_file = Path(f"submit_array_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
     print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
