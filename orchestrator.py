@@ -295,7 +295,7 @@ indicator="SINGLE"
         script_file = Path("submit_single.sh")
         script_file.write_text(script_content)
         print(f"Generated single-run SLURM script: {script_file}")
-        return
+        return script_file
 
     # =========================================================================
     # INNER LOOP ONLY MODE (loopQ == True, outer_loops empty/omitted)
@@ -372,7 +372,7 @@ done < "{target_inner_file}"
         script_file = Path("submit_inner.sh")
         script_file.write_text(script_content)
         print(f"Generated inner-loop SLURM script: {script_file}")
-        return
+        return script_file
 
     # =========================================================================
     # JOB ARRAY MODE (loopQ == True with outer_loops)
