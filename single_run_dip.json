@@ -12,7 +12,7 @@
   },
   "execution": {
     "language": "julia",
-    "executable": "/projappl/lappi/abhiram/trip/sf_nlo_sdaw_dip_T.jl",
+    "executable": "/projappl/lappi/abhiram/dip/sf_nlo_sdaw_dip_T.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
