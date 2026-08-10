@@ -32,7 +32,7 @@ python3 orchestrator.py --help
 2. **Pre-Flight Validation:**
    * Validates required sections (`execution`, `slurm`, `inner_loop`).
    * Validates data types for flags, environment variables, modules, and arguments.
-   * Asserts existence of all referenced inner-loop input files (`file_path` or `inner_files` mappings) on disk prior to script generation.
+   * Asserts existence of all referenced inner-loop input files (`file_path` or `inner_files` mappings) on disk prior to script generation. *This functionality is temporarily disabled*
 3. **Determine Output Mode:**
    * **Single Run Mode** (`loopQ: false`): Writes `submit_single.sh`.
    * **Inner-Loop Only Mode** (`loopQ: true`, no `outer_loops`): Writes `submit_inner.sh`.

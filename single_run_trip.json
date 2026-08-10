@@ -1,0 +1,34 @@
+{
+  "loopQ": false,
+  "slurm": {
+    "account": "lappi",
+    "job-name": "single_trip",
+    "partition": "test",
+    "nodes": 1,
+    "ntasks": 1,
+    "time": "00:15:00",
+    "cpus-per-task": 16,
+    "output": "slurm_%j.log"
+  },
+  "execution": {
+    "language": "python",
+    "executable": "/projappl/lappi/abhiram/trip/sf_nlo_sdaw_trip_T.jl",
+    "modules": [
+      "python-tensorflow"
+    ]
+  },
+  "experiment": {
+    "result_database_path": "/projappl/lappi/abhiram/trip_database/mvgam_balsd",
+    "experiment_name": "mvgam_balsd",
+    "slrm_output_dir": "SLURM_OUTPUT"
+  },
+  "args": {
+    "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
+    "Csq": 915,
+    "Q": 1.5811388300841898,
+    "beta": 0.18,
+    "x": 0.0009,
+    "xmax": 160.0,
+    "neval": 1e9
+  }
+}
