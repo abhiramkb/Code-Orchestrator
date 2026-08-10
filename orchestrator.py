@@ -459,7 +459,7 @@ while read -r line || [ -n "$line" ]; do
     
     indicator="A${{TASK_ID}}_L${{line_no}}"
 
-    indicator_checkpoint="A${{TASK_ID}}_L${{}line_no}_${{combo_hash}}"
+    indicator_checkpoint="A${{TASK_ID}}_L${{line_no}}_${{combo_hash}}"
 
     CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
     if [ -f "$CHECKPOINT_FILE" ]; then
@@ -502,14 +502,38 @@ done < "$target_inner_file"
     script_file.write_text(script_content)
     print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
+def submit_slurm_script(script_path: Path):
+    """Submits the generated script to SLURM."""
+    print(f"\n[INFO] Submitting {script_path} to SLURM...")
+    try:
+        # Calls sbatch. The embedded checkpoint logic handles skips securely.
+        result = subprocess.run(["sbatch", str(script_path)], check=True, capture_output=True, text=True)
+        print(f"[SUCCESS] {result.stdout.strip()}")
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] SLURM Submission failed:\n{e.stderr}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print("[ERROR] 'sbatch' command not found. Are you on a SLURM cluster node?", file=sys.stderr)
+        sys.exit(1)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate SLURM submission scripts from a JSON configuration file.")
+    parser = argparse.ArgumentParser(description="Generate and submit SLURM scripts from a JSON config.")
     parser.add_argument(
         "config",
         nargs="?",
         default="config.json",
         help="Path to the JSON configuration file (default: config.json)"
     )
+    parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="Automatically submit the generated script to SLURM."
+    )
     args = parser.parse_args()
     
-    generate_slurm_script(args.config)
+    generated_script = generate_slurm_script(args.config)
+
+    if args.submit:
+        submit_slurm_script(generated_script)
+    else:
+        print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
