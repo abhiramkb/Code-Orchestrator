@@ -183,10 +183,10 @@ export SLRM_OUTPUT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/{slrm_output_dir_
 # Safe directory creation for the specific job
 export JOB_ID=${{SLURM_JOB_ID:-$$}}
 export SAVE_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/$JOB_ID"
+export CHECKPOINT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/checkpoints"
 
-if [ ! -d "$SAVE_DIR" ]; then
-    mkdir -p "$SAVE_DIR"
-fi
+mkdir -p "$SAVE_DIR"
+mkdir -p "$CHECKPOINT_DIR"
 """
         # Check for dynamic tracking arguments in config
         tracking_args = experiment_cfg.get("tracking_args")
@@ -212,7 +212,11 @@ fi
         exp_args="{tracking_args_str}"
     fi"""
     else:
-        experiment_env_block = ""
+        # Fallback checkpoint directory if no experiment block is defined
+        experiment_env_block = """
+export CHECKPOINT_DIR="./checkpoints"
+mkdir -p "$CHECKPOINT_DIR"
+"""
         exp_args_block = '\n    exp_args=""'
 
     # Extract job array throttling if provided
@@ -250,6 +254,15 @@ fi
 {module_load_block}
 {env_var_block}
 
+indicator="SINGLE"
+
+# Checkpoint check
+CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}.done"
+if [ -f "$CHECKPOINT_FILE" ]; then
+    echo "[CHECKPOINT] $indicator previously completed. Exiting."
+    exit 0
+fi
+
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Single Run (loopQ = false)"
 echo "Flags: {args_str}"
@@ -263,10 +276,15 @@ indicator="SINGLE"
     echo "Job started at: $(date)"
     
     eval "{exec_cmd} $exp_args"
+    EXIT_CODE=$?
     
     endtime=$(date +%s%N)
-    echo "Job finished at: $(date)"
+    echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
     
+    if [ $EXIT_CODE -eq 0 ]; then
+        touch "$CHECKPOINT_FILE"
+    fi
+
     elapsedtime=$((endtime - starttime))
     sec=$(( elapsedtime / 1000000000 ))
     msec=$(( (elapsedtime % 1000000000) / 1000000 ))
@@ -304,7 +322,21 @@ line_no=0
 while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
+
+    # Generate an MD5 hash of the line's contents
+    line_hash=$(echo -n "$line" | md5sum | cut -d ' ' -f 1)
+    
     indicator="L${{line_no}}"
+
+    # Append the hash to the indicator
+    indicator_checkpoint="L${{line_no}}_${{line_hash}}"
+    
+
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
+    if [ -f "$CHECKPOINT_FILE" ]; then
+        echo "[CHECKPOINT] Skipping $indicator - already completed."
+        continue
+    fi
 
     read -r -a inner_vals <<< "$line"
     inner_args_str=""
@@ -319,9 +351,14 @@ while read -r line || [ -n "$line" ]; do
         echo "Job started at: $(date)"
         
         eval "{exec_cmd} $exp_args"
+        EXIT_CODE=$?
         
         endtime=$(date +%s%N)
-        echo "Job finished at: $(date)"
+        echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
+
+        if [ $EXIT_CODE -eq 0 ]; then
+          touch "$CHECKPOINT_FILE"
+        fi
         
         elapsedtime=$((endtime - starttime))
         sec=$(( elapsedtime / 1000000000 ))
@@ -416,7 +453,19 @@ line_no=0
 while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
+
+    # Generate an MD5 hash of the inner line AND the outer arguments
+    combo_hash=$(echo -n "$outer_args_str $line" | md5sum | cut -d ' ' -f 1)
+    
     indicator="A${{TASK_ID}}_L${{line_no}}"
+
+    indicator_checkpoint="A${{TASK_ID}}_L${{}line_no}_${{combo_hash}}"
+
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
+    if [ -f "$CHECKPOINT_FILE" ]; then
+        echo "[CHECKPOINT] Skipping $indicator - already completed."
+        continue
+    fi
 
     read -r -a inner_vals <<< "$line"
     inner_args_str=""
@@ -431,9 +480,14 @@ while read -r line || [ -n "$line" ]; do
         echo "Job started at: $(date)"
         
         eval "{exec_cmd} $exp_args"
+        EXIT_CODE=$?
         
         endtime=$(date +%s%N)
-        echo "Job finished at: $(date)"
+        echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
+
+        if [ $EXIT_CODE -eq 0 ]; then
+            touch "$CHECKPOINT_FILE"
+        fi
         
         elapsedtime=$((endtime - starttime))
         sec=$(( elapsedtime / 1000000000 ))
