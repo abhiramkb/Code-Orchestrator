@@ -5,6 +5,7 @@ import itertools
 import argparse
 import sys
 from pathlib import Path
+import subprocess
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
