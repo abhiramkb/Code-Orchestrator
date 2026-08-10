@@ -503,6 +503,8 @@ done < "$target_inner_file"
     script_file.write_text(script_content)
     print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
+    return script_file
+
 def submit_slurm_script(script_path: Path):
     """Submits the generated script to SLURM."""
     print(f"\n[INFO] Submitting {script_path} to SLURM...")
