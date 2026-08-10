@@ -176,16 +176,17 @@ fi
         tracking_args = experiment_cfg.get("tracking_args")
 
         arg_components = []
-        for key, val_template in tracking_args.items():
-            # Substitute python-level static template parameters
-            formatted_val = val_template.format(experiment_name=exp_name)
-                
-            # Translate placeholder keywords to bash variable syntaxes
-            formatted_val = formatted_val.replace("{save_dir}", "$SAVE_DIR")
-            formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
-            formatted_val = formatted_val.replace("{indicator}", "${indicator}")
-                
-            arg_components.append(f'--{key} \\"{formatted_val}\\"')
+        if tracking_args is not None:
+          for key, val_template in tracking_args.items():
+              # Substitute python-level static template parameters
+              formatted_val = val_template.format(experiment_name=exp_name)
+                  
+              # Translate placeholder keywords to bash variable syntaxes
+              formatted_val = formatted_val.replace("{save_dir}", "$SAVE_DIR")
+              formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
+              formatted_val = formatted_val.replace("{indicator}", "${indicator}")
+                  
+              arg_components.append(f'--{key} \\"{formatted_val}\\"')
 
         tracking_args_str = " ".join(arg_components)
 
