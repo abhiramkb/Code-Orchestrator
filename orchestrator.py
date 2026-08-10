@@ -6,12 +6,28 @@ import argparse
 import sys
 from pathlib import Path
 
+def determine_loop_q(cfg: dict) -> bool:
+    """Determines if loop mode is active based on config flags and structure."""
+    if "loopQ" in cfg:
+        return bool(cfg["loopQ"])
+    
+    # If loopQ is missing, check if loop options are absent while args is present
+    has_inner = "inner_loop" in cfg
+    has_outer = "outer_loops" in cfg
+    has_args = "args" in cfg
+
+    if not has_inner and not has_outer and has_args:
+        return False
+
+    return True
+
+
 def validate_config(cfg: dict, config_path: str):
     """Validates structure, data types, and file existence for the configuration dictionary."""
     errors = []
 
     # 1. Validate top-level keys
-    loop_q = bool(cfg.get("loopQ", True))
+    loop_q = determine_loop_q(cfg)
 
     if "execution" not in cfg or not isinstance(cfg["execution"], dict):
         errors.append("Missing or invalid 'execution' section (must be an object).")
@@ -122,7 +138,7 @@ def generate_slurm_script(config_path):
     validate_config(cfg, config_path)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
-    loop_q = bool(cfg.get("loopQ", True))
+    loop_q = determine_loop_q(cfg)
     exec_cfg = cfg["execution"]
     slurm_cfg = cfg["slurm"].copy()
     experiment_cfg = cfg.get("experiment")
