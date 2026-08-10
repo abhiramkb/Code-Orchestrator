@@ -3,6 +3,7 @@ from datetime import datetime
 import shutil
 import itertools
 import argparse
+import shlex #For safe parsing of inputs. Spaces or special character as handled without crashing the bash script.
 import sys
 from pathlib import Path
 import subprocess
@@ -145,13 +146,14 @@ def generate_slurm_script(config_path):
     experiment_cfg = cfg.get("experiment")
 
     # Handle experiment tracking paths and SLURM header generation
+    exp_name = "noexp" #Default value for exp_name if no experiment info is provided. Used for script name later.
     if experiment_cfg:
         db_path = experiment_cfg["result_database_path"]
         exp_name = experiment_cfg["experiment_name"]
         slrm_output_dir_name = experiment_cfg["slrm_output_dir"]
         
         # SLURM output directory path: <result_database_path>/<experiment_name>/<slrm_output_dir>
-        full_slrm_output_dir = f"{db_path}/{exp_name}/{slrm_output_dir_name}"
+        full_slrm_output_dir = Path(db_path) / exp_name / slrm_output_dir_name
         
         # Set SLURM standard output option: <full_slrm_output_dir>/<experiment_name>_%j.out
         slurm_cfg["output"] = f"{full_slrm_output_dir}/{exp_name}_%j.out"
@@ -241,15 +243,18 @@ mkdir -p "$CHECKPOINT_DIR"
 
     flags_str = " ".join(exec_cfg.get("flags", []))
 
+    
+
     # =========================================================================
     # SINGLE RUN MODE (loopQ == False)
     # =========================================================================
     if not loop_q:
         args_cfg = cfg.get("args", {})
-        args_str = " ".join(f"--{k} {v}" for k, v in args_cfg.items())
+        args_str = " ".join(f"--{k} {shlex.quote(str(v))}" for k, v in args_cfg.items())
         exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} {args_str}".strip()
 
         script_content = f"""#!/bin/bash
+set -euo pipefail
 {slurm_header}
 {experiment_env_block}
 {module_load_block}
@@ -292,7 +297,9 @@ indicator="SINGLE"
     printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
 }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 """
-        script_file = Path("submit_single.sh")
+        #script_file = Path("submit_single.sh")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_file = Path(f"submit_single_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
         print(f"Generated single-run SLURM script: {script_file}")
         return script_file
@@ -308,6 +315,7 @@ indicator="SINGLE"
         exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
 
         script_content = f"""#!/bin/bash
+set -euo pipefail
 {slurm_header}
 {experiment_env_block}
 {module_load_block}
@@ -369,7 +377,9 @@ while read -r line || [ -n "$line" ]; do
 
 done < "{target_inner_file}"
 """
-        script_file = Path("submit_inner.sh")
+        #script_file = Path("submit_inner.sh")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_file = Path(f"submit_inner_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
         print(f"Generated inner-loop SLURM script: {script_file}")
         return script_file
@@ -394,7 +404,7 @@ done < "{target_inner_file}"
 
     for combo in outer_combinations:
         combo_dict = dict(zip(outer_keys, combo))
-        outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
+        outer_args_str = " ".join(f"--{k} {shlex.quote(str(v))}" for k, v in combo_dict.items())
         outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
         
         target_inner_file = inner_cfg.get("file_path")
@@ -417,6 +427,7 @@ done < "{target_inner_file}"
     exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $outer_args_str $inner_args_str".strip()
 
     script_content = f"""#!/bin/bash
+set -euo pipefail
 {slurm_header}{array_header}
 {experiment_env_block}
 {module_load_block}
@@ -499,7 +510,9 @@ while read -r line || [ -n "$line" ]; do
 done < "$target_inner_file"
 """
 
-    script_file = Path("submit_array.sh")
+    #script_file = Path("submit_array.sh")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    script_file = Path(f"submit_array_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
     print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
