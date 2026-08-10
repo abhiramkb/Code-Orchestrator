@@ -16,10 +16,12 @@
     }
   },
   "slurm": {
+    "account": "lappi",
     "job-name": "test_loop",
     "partition": "test",
     "nodes": 1,
     "time": "00:15:00",
+    "cpus-per-task": 1,
     "output": "slurm_%j.log"
   },
   "inner_loop": {
