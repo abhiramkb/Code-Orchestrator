@@ -1,4 +1,6 @@
 import json
+from datetime import datetime
+import shutil
 import itertools
 import argparse
 import sys
@@ -79,6 +81,22 @@ def validate_config(cfg: dict, config_path: str):
             for req_key in ["result_database_path", "experiment_name", "slrm_output_dir"]:
                 if req_key not in exp_cfg or not isinstance(exp_cfg[req_key], str):
                     errors.append(f"Missing or invalid 'experiment.{req_key}' (must be a string).")
+            # Check for tracking_args dictionary
+            if "tracking_args" not in exp_cfg or exp_cfg["tracking_args"] is None:
+                print(
+                    "[WARNING] 'tracking_args' is missing under 'experiment' in configuration.\n"
+                    "          'exp_args' will default to an empty string.\n"
+                    "          Example structure to enable dynamic tracking flags:\n"
+                    "          \"experiment\": {\n"
+                    "              \"tracking_args\": {\n"
+                    "                  \"save_dir\": \"{save_dir}/{experiment_name}_{__indicator}\",\n"
+                    "                  \"json\": \"{save_dir}/{experiment_name}_{__indicator}/result.json\"\n"
+                    "              }\n"
+                    "          }\n",
+                    file=sys.stderr
+                )
+            elif not isinstance(exp_cfg["tracking_args"], dict):
+                errors.append("'experiment.tracking_args' must be an object (key-value pairs).")
 
     if errors:
         print(f"\n[CONFIG ERROR] Validation failed for '{config_path}':", file=sys.stderr)
@@ -128,6 +146,16 @@ def generate_slurm_script(config_path):
         except Exception as e:
             print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
 
+        # Copy configuration file to <result_database_path>/<experiment_name>/<datetime_string>/
+        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = Path(db_path) / exp_name / datetime_str
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_file, backup_dir / config_file.name)
+            print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
+        except Exception as e:
+            print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
+
         experiment_env_block = f"""
 # =========================================================================
 # EXPERIMENT TRACKING
@@ -144,8 +172,31 @@ if [ ! -d "$SAVE_DIR" ]; then
     mkdir -p "$SAVE_DIR"
 fi
 """
+        # Check for dynamic tracking arguments in config
+        tracking_args = experiment_cfg.get("tracking_args")
+
+        arg_components = []
+        for key, val_template in tracking_args.items():
+            # Substitute python-level static template parameters
+            formatted_val = val_template.format(experiment_name=exp_name)
+                
+            # Translate placeholder keywords to bash variable syntaxes
+            formatted_val = formatted_val.replace("{save_dir}", "$SAVE_DIR")
+            formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
+            formatted_val = formatted_val.replace("{indicator}", "${indicator}")
+                
+            arg_components.append(f'--{key} \\"{formatted_val}\\"')
+
+        tracking_args_str = " ".join(arg_components)
+
+        exp_args_block = f"""
+    exp_args=""
+    if [ -n "${{SAVE_DIR:-}}" ]; then
+        exp_args="{tracking_args_str}"
+    fi"""
     else:
         experiment_env_block = ""
+        exp_args_block = '\n    exp_args=""'
 
     # Extract job array throttling if provided
     max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
@@ -188,10 +239,7 @@ echo "Flags: {args_str}"
 echo "================================================================"
 
 indicator="SINGLE"
-exp_args=""
-if [ -n "${{SAVE_DIR:-}}" ]; then
-    exp_args="--save_dir \\"$SAVE_DIR\\" --json \\"$SAVE_DIR/result_${{indicator}}.json\\""
-fi
+{exp_args_block}
 
 {{
     starttime=$(date +%s%N)
@@ -247,11 +295,7 @@ while read -r line || [ -n "$line" ]; do
         for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
             script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
 
-        script_content += f"""
-    exp_args=""
-    if [ -n "${{SAVE_DIR:-}}" ]; then
-        exp_args="--save_dir \\"$SAVE_DIR\\" --json \\"$SAVE_DIR/result_${{indicator}}.json\\""
-    fi
+        script_content += f"""{exp_args_block}
 
     {{
         starttime=$(date +%s%N)
@@ -363,11 +407,7 @@ while read -r line || [ -n "$line" ]; do
     for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
         script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
 
-    script_content += f"""
-    exp_args=""
-    if [ -n "${{SAVE_DIR:-}}" ]; then
-        exp_args="--save_dir \\"$SAVE_DIR\\" --json \\"$SAVE_DIR/result_${{indicator}}.json\\""
-    fi
+    script_content += f"""{exp_args_block}
 
     {{
         starttime=$(date +%s%N)
