@@ -194,25 +194,25 @@ mkdir -p "$CHECKPOINT_DIR"
         # Check for dynamic tracking arguments in config
         tracking_args = experiment_cfg.get("tracking_args")
 
-        arg_components = []
         if tracking_args is not None:
+          # Build array-append lines
+          tracking_lines = []
           for key, val_template in tracking_args.items():
-              formatted_val = val_template 
-              # Translate placeholder keywords to bash variable syntaxes
-              formatted_val = formatted_val.replace("{result_database_path}", "${RESULT_DATABASE_PATH}")  
-              formatted_val = formatted_val.replace("{experiment_name}", "${EXPERIMENT_NAME}")
-              formatted_val = formatted_val.replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
-              formatted_val = formatted_val.replace("{save_dir}", "${SAVE_DIR}")
-              formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
+              for key, val_template in tracking_args.items():
+                # Replace placeholders with Bash variables
+                formatted_val = (val_template
+                    .replace("{result_database_path}", "${RESULT_DATABASE_PATH}")
+                    .replace("{experiment_name}", "${EXPERIMENT_NAME}")
+                    .replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
+                    .replace("{save_dir}", "${SAVE_DIR}")
+                    .replace("{__indicator}", "${indicator}"))
                   
-              arg_components.append(f'"--{key}" "{formatted_val}"')
+            # Append to the Bash array
+              tracking_lines.append(f'    exp_args+=( --{key} "{formatted_val}" )')
 
-        tracking_args_str = " ".join(arg_components)
-
-        exp_args_block = f"""
-    exp_args=""
+        exp_args_block = f"""    exp_args=()
     if [ -n "${{SAVE_DIR:-}}" ]; then
-        exp_args="{tracking_args_str}"
+{chr(10).join(tracking_lines)}
     fi"""
     else:
         # Fallback checkpoint directory if no experiment block is defined
@@ -220,7 +220,7 @@ mkdir -p "$CHECKPOINT_DIR"
 export CHECKPOINT_DIR="./checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 """
-        exp_args_block = '\n    exp_args=""'
+        exp_args_block = '\n    exp_args=()'
 
     # Extract job array throttling if provided
     max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
