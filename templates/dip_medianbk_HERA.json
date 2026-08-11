@@ -8,6 +8,7 @@
     "ntasks": 1,
     "time": "23:59:00",
     "cpus-per-task": 16,
+    "mem": "10G",
     "output": "slurm_%j.log"
   },
   "execution": {
