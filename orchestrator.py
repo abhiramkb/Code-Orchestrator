@@ -325,6 +325,8 @@ indicator="SINGLE"
     msec=$(( (elapsedtime % 1000000000) / 1000000 ))
     printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
 }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
+
+wait
 """
         #script_file = Path("submit_single.sh")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -416,6 +418,8 @@ while read -r line || [ -n "$line" ]; do
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
 done < "{target_inner_file}"
+
+wait
 """
         #script_file = Path("submit_inner.sh")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -559,6 +563,8 @@ while read -r line || [ -n "$line" ]; do
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
 done < "$target_inner_file"
+
+wait
 """
 
     #script_file = Path("submit_array.sh")
