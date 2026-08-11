@@ -16,8 +16,10 @@ def determine_loop_q(cfg: dict) -> bool:
     has_inner = "inner_loop" in cfg
     has_outer = "outer_loops" in cfg
     has_args = "args" in cfg
+    has_slurm = "slurm" in cfg
+    has_execution = "execution" in cfg
 
-    if not has_inner and not has_outer and has_args:
+    if not has_inner and not has_outer and has_args and has_slurm and has_execution:
         return False
 
     return True
@@ -145,6 +147,8 @@ def generate_slurm_script(config_path):
     experiment_cfg = cfg.get("experiment")
 
     # Handle experiment tracking paths and SLURM header generation
+    if not experiment_cfg:
+        exp_name = "noexp"
     if experiment_cfg:
         db_path = experiment_cfg["result_database_path"]
         exp_name = experiment_cfg["experiment_name"]
