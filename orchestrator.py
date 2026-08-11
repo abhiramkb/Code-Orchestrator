@@ -617,7 +617,8 @@ def extract_config_flags(cfg: dict) -> set[str]:
     for key in raw_keys:
         key_str = str(key).strip()
         if not key_str.startswith("-"):
-            flag = f"-{key_str}" if len(key_str) == 1 else f"--{key_str}"
+            #flag = f"-{key_str}" if len(key_str) == 1 else f"--{key_str}"
+            flag = f"--{key_str}"
         else:
             flag = key_str
         formatted_flags.add(flag)
