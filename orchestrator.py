@@ -760,11 +760,6 @@ if __name__ == "__main__":
     
     generated_script = generate_slurm_script(args.config, args.dryrun)
 
-    if args.checkargs:
-        result = validate_script_args(args.config)
-        print(result)
-        exit()
-
     if args.dryrun:
         print(f"\n[INFO] Dry-run: not submitting to SLURM.")
     elif args.submit:
