@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 import subprocess
+import re
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
@@ -579,6 +580,123 @@ wait
 
     return script_file
 
+def extract_config_flags(cfg: dict) -> set[str]:
+    """Collects all argument keys across all configuration sections and converts them to CLI flags."""
+    raw_keys = set()
+
+    # 1. Static arguments
+    if isinstance(cfg.get("args"), dict):
+        raw_keys.update(cfg["args"].keys())
+
+    # 2. Inner loop argument names
+    inner_cfg = cfg.get("inner_loop", {})
+    if isinstance(inner_cfg, dict) and isinstance(
+        inner_cfg.get("arg_names"), list
+    ):
+        raw_keys.update(inner_cfg["arg_names"])
+
+    # 3. Outer loop argument names
+    outer_cfg = cfg.get("outer_loops", [])
+    if isinstance(outer_cfg, list):
+        for o_loop in outer_cfg:
+            if isinstance(o_loop, dict):
+                if isinstance(o_loop.get("arg_names"), list):
+                    raw_keys.update(o_loop["arg_names"])
+                elif isinstance(o_loop.get("arg_name"), str):
+                    raw_keys.add(o_loop["arg_name"])
+
+    # 4. Experiment tracking arguments
+    exp_cfg = cfg.get("experiment", {})
+    if isinstance(exp_cfg, dict) and isinstance(
+        exp_cfg.get("tracking_args"), dict
+    ):
+        raw_keys.update(exp_cfg["tracking_args"].keys())
+
+    # Convert keys into CLI flag formats (e.g., "lr" -> "--lr", "v" -> "-v")
+    formatted_flags = set()
+    for key in raw_keys:
+        key_str = str(key).strip()
+        if not key_str.startswith("-"):
+            flag = f"-{key_str}" if len(key_str) == 1 else f"--{key_str}"
+        else:
+            flag = key_str
+        formatted_flags.add(flag)
+
+    return formatted_flags
+
+def validate_script_args(config_path) -> tuple[bool, list[str]]:
+    """Validates if arguments defined in the config dictionary are supported by the target executable via --help.
+
+    Returns:
+        tuple[bool, list[str]]: (is_valid, list_of_unsupported_flags)
+    """
+    config_file = Path(config_path)
+    if not config_file.is_file():
+        print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    with open(config_file) as f:
+        try:
+            cfg = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    exec_cfg = cfg.get("execution", {})
+    interpreter = exec_cfg.get("language", "")
+    executable_path = exec_cfg.get("executable", "")
+    modules = exec_cfg.get("modules", [])
+
+    if not interpreter or not executable_path:
+        raise ValueError(
+            "Missing required 'execution.language' or 'execution.executable' in config."
+        )
+
+    # Collect flags planned across all modes
+    flags_to_check = extract_config_flags(cfg)
+    if not flags_to_check:
+        return True, []
+
+    # Build bash command to load modules and invoke help flag
+    module_cmds = [f"module load {m}" for m in modules]
+    exec_cmd = f"{interpreter} {executable_path} --help"
+    full_cmd = " && ".join(module_cmds + [exec_cmd])
+
+    try:
+        result = subprocess.run(
+            ["bash", "-c", full_cmd],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        help_output = result.stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        stderr_msg = e.stderr if hasattr(e, "stderr") else str(e)
+        raise RuntimeError(
+            f"Failed to execute '--help' check on '{executable_path}':\n{stderr_msg}"
+        ) from e
+
+    # Extract all supported option flags from --help text
+    raw_found_flags = set(re.findall(r"(?<!\w)(-[a-zA-Z0-9_|-]+)", help_output))
+
+    supported_flags = set()
+    for flag_group in raw_found_flags:
+        for flag in re.split(r"[,|/]", flag_group):
+            clean_flag = flag.strip()
+            supported_flags.add(clean_flag)
+
+    # Check each planned flag (handles underscore vs hyphen conversion e.g. --batch_size vs --batch-size)
+    unsupported = []
+    for flag in flags_to_check:
+        alt_hyphen = flag.replace("_", "-")
+        alt_underscore = flag.replace("-", "_")
+
+        if not ({flag, alt_hyphen, alt_underscore} & supported_flags):
+            unsupported.append(flag)
+
+    return len(unsupported) == 0, unsupported
+
 def submit_slurm_script(script_path: Path):
     """Submits the generated script to SLURM."""
     print(f"\n[INFO] Submitting {script_path} to SLURM...")
@@ -609,11 +727,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dryrun",
         action="store_true",
-        help="Automatically submit the generated script to SLURM."
+        help="Dry run."
+    )
+    parser.add_argument(
+        "--checkargs",
+        action="store_true",
+        help="Check if the args passed to the executable are supported."
     )
     args = parser.parse_args()
     
     generated_script = generate_slurm_script(args.config, args.dryrun)
+
+    if args.checkargs:
+        result = validate_script_args(args.config)
+        print(result)
+        exit()
 
     if args.dryrun:
         print(f"\n[INFO] Dry-run: not submitting to SLURM.")
