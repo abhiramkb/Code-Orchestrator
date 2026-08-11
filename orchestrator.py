@@ -146,6 +146,16 @@ def generate_slurm_script(config_path):
     slurm_cfg = cfg["slurm"].copy()
     experiment_cfg = cfg.get("experiment")
 
+    # Global fixed arguments passed in every run mode (looped/non-looped)
+    fixed_args_cfg = cfg.get("args", {})
+    fixed_args_list = []
+    for k, v in fixed_args_cfg.items():
+        if isinstance(v, str):
+            fixed_args_list.append(f'--{k} \\"{v}\\"')
+        else:
+            fixed_args_list.append(f'--{k} {v}')
+    fixed_args_str = " ".join(fixed_args_list)
+
     # Handle experiment tracking paths and SLURM header generation
     if not experiment_cfg:
         exp_name = "noexp"
@@ -249,9 +259,11 @@ mkdir -p "$CHECKPOINT_DIR"
     # SINGLE RUN MODE (loopQ == False)
     # =========================================================================
     if not loop_q:
-        args_cfg = cfg.get("args", {})
-        args_str = " ".join(f"--{k} {v}" for k, v in args_cfg.items())
-        exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} {args_str}".strip()
+        #args_cfg = cfg.get("args", {})
+        #args_str = " ".join(f"--{k} {v}" for k, v in args_cfg.items())
+        #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} {args_str}".strip()
+        cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str]
+        exec_cmd = " ".join(p for p in cmd_parts if p)
 
         script_content = f"""#!/bin/bash
 {slurm_header}
@@ -270,7 +282,7 @@ fi
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Single Run (loopQ = false)"
-echo "Flags: {args_str}"
+echo "Flags: {fixed_args_str}"
 echo "================================================================"
 
 indicator="SINGLE"
@@ -311,7 +323,10 @@ indicator="SINGLE"
 
     if not outer_cfg:
         target_inner_file = inner_cfg["file_path"]
-        exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
+        #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
+        # Add fixed_args_str before inner loop arguments
+        cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$inner_args_str"]
+        exec_cmd = " ".join(p for p in cmd_parts if p)
 
         script_content = f"""#!/bin/bash
 {slurm_header}
@@ -321,6 +336,7 @@ indicator="SINGLE"
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
+echo "Fixed Args: {fixed_args_str}"
 echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
 echo "================================================================"
@@ -422,7 +438,10 @@ done < "{target_inner_file}"
     descs_array_block = "\n".join(bash_outer_descs)
     files_array_block = "\n".join(bash_target_files)
 
-    exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $outer_args_str $inner_args_str".strip()
+    #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $outer_args_str $inner_args_str".strip()
+    # Add fixed_args_str before outer and inner loop arguments
+    cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$outer_args_str $inner_args_str"]
+    exec_cmd = " ".join(p for p in cmd_parts if p)
 
     script_content = f"""#!/bin/bash
 {slurm_header}{array_header}
@@ -452,6 +471,7 @@ target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
 
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
+echo "Fixed Args: {fixed_args_str}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
 echo "Inner Loop Source File: $target_inner_file"

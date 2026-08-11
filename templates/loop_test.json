@@ -28,5 +28,11 @@
     "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_lowQ_smallx.txt",
     "delimiter": " ",
     "arg_names": ["Q", "beta", "x"]
+  },
+  "args": {
+    "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
+    "Csq": 915,
+    "xmax": 160.0,
+    "neval": 1e8
   }
 }
