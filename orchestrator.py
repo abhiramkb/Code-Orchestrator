@@ -163,10 +163,6 @@ def generate_slurm_script(config_path):
             fixed_args_list.append(f'--{k} {v}')
     fixed_args_str = " ".join(fixed_args_list)
 
-    # Full execution signature string used for checkpoint hashing
-    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
-    exec_sig_str = " ".join(p for p in exec_sig_components if p)
-
     # Handle experiment tracking paths and SLURM header generation
     if not experiment_cfg:
         exp_name = "noexp"
@@ -265,6 +261,10 @@ mkdir -p "$CHECKPOINT_DIR"
     )
 
     flags_str = " ".join(exec_cfg.get("flags", []))
+
+    # Full execution signature string used for checkpoint hashing
+    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
+    exec_sig_str = " ".join(p for p in exec_sig_components if p)
 
     # =========================================================================
     # SINGLE RUN MODE (loopQ == False)
