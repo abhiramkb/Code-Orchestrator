@@ -1,0 +1,39 @@
+{
+  "loopQ": false,
+  "slurm": {
+    "account": "lappi",
+    "job-name": "single_dip",
+    "partition": "test",
+    "nodes": 1,
+    "ntasks": 1,
+    "time": "00:15:00",
+    "cpus-per-task": 16,
+    "output": "slurm_%j.log"
+  },
+  "execution": {
+    "language": "julia",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_nlo_sdaw_dip_T.jl",
+    "modules": [
+      "openmpi",
+      "julia/1.11.9",
+      "julia-mpi"
+    ],
+    "env_vars": {
+      "JULIA_NUM_THREADS": "$SLURM_CPUS_PER_TASK"
+    }
+  },
+  "experiment": {
+    "result_database_path": "/projappl/lappi/abhiram/dip_database",
+    "experiment_name": "mvgam_balsd",
+    "slrm_output_dir": "SLURM_OUTPUT"
+  },
+  "args": {
+    "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
+    "Csq": 915,
+    "Q": 1.5811388300841898,
+    "beta": 0.18,
+    "x": 0.0009,
+    "xmax": 160.0,
+    "neval": 1e8
+  }
+}
