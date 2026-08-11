@@ -625,9 +625,6 @@ def extract_config_flags(cfg: dict) -> set[str]:
             flag = key_str
         formatted_flags.add(flag)
 
-    print("raw_keys = ",raw_keys)
-    print("formatted_flags = ",formatted_flags)
-
     return formatted_flags
 
 def validate_script_args(config_path) -> tuple[bool, list[str]]:
