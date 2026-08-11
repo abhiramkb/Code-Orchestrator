@@ -617,8 +617,7 @@ if __name__ == "__main__":
 
     if args.dryrun:
         print(f"\n[INFO] Dry-run: not submitting to SLURM.")
-    else    
-        if args.submit:
-            submit_slurm_script(generated_script)
-        else:
-            print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
+    elif args.submit:
+        submit_slurm_script(generated_script)
+    else:
+        print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
