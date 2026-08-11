@@ -387,6 +387,7 @@ while read -r line || [ -n "$line" ]; do
         sec=$(( elapsedtime / 1000000000 ))
         msec=$(( (elapsedtime % 1000000000) / 1000000 ))
         printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
+        echo ""
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
 done < "{target_inner_file}"
