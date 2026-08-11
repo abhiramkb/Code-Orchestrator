@@ -146,6 +146,10 @@ def generate_slurm_script(config_path):
     slurm_cfg = cfg["slurm"].copy()
     experiment_cfg = cfg.get("experiment")
 
+    # Resolve executable path and directory to be able to properly obtain git context
+    exec_path = Path(exec_cfg["executable"]).resolve()
+    exec_dir = exec_path.parent
+
     # Global fixed arguments passed in every run mode (looped/non-looped)
     fixed_args_cfg = cfg.get("args", {})
     fixed_args_list = []
@@ -271,6 +275,9 @@ mkdir -p "$CHECKPOINT_DIR"
 {module_load_block}
 {env_var_block}
 
+# Navigate to executable directory to preserve repo/git context
+cd "{exec_dir}" || exit 1
+
 indicator="SINGLE"
 
 # Checkpoint check
@@ -322,7 +329,8 @@ indicator="SINGLE"
     outer_cfg = cfg.get("outer_loops", [])
 
     if not outer_cfg:
-        target_inner_file = inner_cfg["file_path"]
+        target_inner_file = str(Path(inner_cfg["file_path"]).resolve())
+        #target_inner_file = inner_cfg["file_path"]
         #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
         # Add fixed_args_str before inner loop arguments
         cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$inner_args_str"]
@@ -333,6 +341,9 @@ indicator="SINGLE"
 {experiment_env_block}
 {module_load_block}
 {env_var_block}
+
+# Navigate to executable directory to preserve repo/git context
+cd "{exec_dir}" || exit 1
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
@@ -423,7 +434,9 @@ done < "{target_inner_file}"
         outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
         
         target_inner_file = inner_cfg.get("file_path")
-        if not target_inner_file and outer_cfg:
+        if target_inner_file:
+            target_inner_file = str(Path(target_inner_file).resolve())
+        elif outer_cfg:
             for loop_cfg in outer_cfg:
                 arg_name = loop_cfg["arg_name"]
                 val = combo_dict.get(arg_name)
@@ -449,6 +462,9 @@ done < "{target_inner_file}"
 {experiment_env_block}
 {module_load_block}
 {env_var_block}
+
+# Navigate to executable directory to preserve repo/git context
+cd "{exec_dir}" || exit 1
 
 # Parameter mapping arrays built by orchestrator.py
 OUTER_ARGS=(
