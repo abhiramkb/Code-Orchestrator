@@ -7,7 +7,7 @@
     "ntasks": 1,
     "time": "23:59:00",
     "cpus-per-task": 72,
-    "gres": "gpu:gh200:1"
+    "gres": "gpu:gh200:1",
     "output": "slurm_%j.log"
   },
   "execution": {
