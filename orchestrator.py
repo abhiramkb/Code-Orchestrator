@@ -708,13 +708,13 @@ def submit_slurm_script(script_path: Path, config_path, checkargsQ):
 
     if checkargsQ:
         print(f"\n[INFO] Validating arguments passed to executable...")
-        print(f"\n[INFO] This may take some time. Use --noargcheck to disable argument checking.")
-        print(f"\n[INFO] CAUTION: Validation function expects all args in \"--<args>\" format!")
-        print(f"\n[INFO] This includes single letter args!")
+        print(f"[INFO] This may take some time. Use --noargcheck to disable argument checking.")
+        print(f"[INFO] CAUTION: Validation function expects all args in \"--<args>\" format!")
+        print(f"[INFO] This includes single letter args!")
         validation_result, failed_args = validate_script_args(config_path)
         if not validation_result:
             print(f"\n[ERROR] Argument validation failed!")
-            print(f"\n[ERROR] Offending args: ", " ".join(failed_args))
+            print(f"[ERROR] Offending args: ", " ".join(failed_args))
             sys.exit(1)
         else:
             print(f"\n[SUCCESS] Argument validation succeeded!")
