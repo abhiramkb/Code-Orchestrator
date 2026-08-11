@@ -581,7 +581,9 @@ wait
     return script_file
 
 def extract_config_flags(cfg: dict) -> set[str]:
-    """Collects all argument keys across all configuration sections and converts them to CLI flags."""
+    """Collects all argument keys across all configuration sections and converts them to CLI flags.
+    CAUTION: Code assumes single letter args also use the "--<arg>" convention.
+    """
     raw_keys = set()
 
     # 1. Static arguments
@@ -701,8 +703,22 @@ def validate_script_args(config_path) -> tuple[bool, list[str]]:
 
     return len(unsupported) == 0, unsupported
 
-def submit_slurm_script(script_path: Path):
+def submit_slurm_script(script_path: Path, config_path, checkargsQ):
     """Submits the generated script to SLURM."""
+
+    if checkargsQ:
+        print(f"\n[INFO] Validating arguments passed to executable...")
+        print(f"\n[INFO] This may take some time. Use --noargcheck to disable argument checking.")
+        print(f"\n[INFO] CAUTION: Validation function expects all args in \"--<args>\" format!")
+        print(f"\n[INFO] This includes single letter args!")
+        validation_result, failed_args = validate_script_args(config_path)
+        if not validation_result:
+            print(f"\n[ERROR] Argument validation failed!")
+            print(f"\n[ERROR] Offending args: ", " ".join(failed_args))
+            sys.exit(1)
+        else:
+            print(f"\n[SUCCESS] Argument validation succeeded!")
+    
     print(f"\n[INFO] Submitting {script_path} to SLURM...")
     try:
         # Calls sbatch. The embedded checkpoint logic handles skips securely.
@@ -734,11 +750,13 @@ if __name__ == "__main__":
         help="Dry run."
     )
     parser.add_argument(
-        "--checkargs",
+        "--noargcheck",
         action="store_true",
-        help="Check if the args passed to the executable are supported."
+        help="Disable checking of whether args passed to the executable are supported."
     )
     args = parser.parse_args()
+
+    checkargsQ = not args.noargcheck
     
     generated_script = generate_slurm_script(args.config, args.dryrun)
 
@@ -750,6 +768,6 @@ if __name__ == "__main__":
     if args.dryrun:
         print(f"\n[INFO] Dry-run: not submitting to SLURM.")
     elif args.submit:
-        submit_slurm_script(generated_script)
+        submit_slurm_script(generated_script, args.config, checkargsQ)
     else:
         print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
