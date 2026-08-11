@@ -127,7 +127,7 @@ def validate_config(cfg: dict, config_path: str):
         sys.exit(1)
 
 
-def generate_slurm_script(config_path):
+def generate_slurm_script(config_path, dryrunQ):
     config_file = Path(config_path)
     if not config_file.is_file():
         print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
@@ -185,14 +185,15 @@ def generate_slurm_script(config_path):
             print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
 
         # Copy configuration file to <result_database_path>/<experiment_name>/<datetime_string>/
-        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = Path(db_path) / exp_name / datetime_str
-        try:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(config_file, backup_dir / config_file.name)
-            print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
-        except Exception as e:
-            print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
+        if not dryrunQ:
+            datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = Path(db_path) / exp_name / datetime_str
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(config_file, backup_dir / config_file.name)
+                print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
+            except Exception as e:
+                print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
 
         experiment_env_block = f"""
 # =========================================================================
@@ -300,6 +301,7 @@ fi
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Single Run (loopQ = false)"
 echo "Working Directory: {exec_dir}"
+echo "Exec Path: {exec_path}"
 echo "Flags: {fixed_args_str}"
 echo "================================================================"
 
@@ -363,6 +365,7 @@ EXEC_SIG="{exec_sig_str}"
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
 echo "Working Directory: {exec_dir}"
+echo "Exec Path: {exec_path}"
 echo "Fixed Args: {fixed_args_str}"
 echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
@@ -509,6 +512,7 @@ target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
 echo "Working Directory: {exec_dir}"
+echo "Exec Path: {exec_path}"
 echo "Fixed Args: {fixed_args_str}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
@@ -602,11 +606,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Automatically submit the generated script to SLURM."
     )
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="Automatically submit the generated script to SLURM."
+    )
     args = parser.parse_args()
     
-    generated_script = generate_slurm_script(args.config)
+    generated_script = generate_slurm_script(args.config, args.dryrun)
 
-    if args.submit:
-        submit_slurm_script(generated_script)
-    else:
-        print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
+    if args.dryrun:
+        print(f"\n[INFO] Dry-run: not submitting to SLURM.")
+    else    
+        if args.submit:
+            submit_slurm_script(generated_script)
+        else:
+            print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
