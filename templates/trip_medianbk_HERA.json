@@ -12,7 +12,7 @@
   },
   "execution": {
     "language": "python",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_batched_nlo_sdaw_trip_T.py",
+    "executable": "/projappl/lappi/abhiram/trip/sf_batched_nlo_sdaw_trip_T.py",
     "modules": [
       "python-tensorflow"
     ],
