@@ -31,6 +31,9 @@ def validate_config(cfg: dict, config_path: str):
 
     # 1. Validate top-level keys
     loop_q = determine_loop_q(cfg)
+    
+    if "args" in cfg and not isinstance(cfg["args"], dict):
+        errors.append("'args' must be an object (key-value pairs).")
 
     if "execution" not in cfg or not isinstance(cfg["execution"], dict):
         errors.append("Missing or invalid 'execution' section (must be an object).")
@@ -160,6 +163,10 @@ def generate_slurm_script(config_path):
             fixed_args_list.append(f'--{k} {v}')
     fixed_args_str = " ".join(fixed_args_list)
 
+    # Full execution signature string used for checkpoint hashing
+    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
+    exec_sig_str = " ".join(p for p in exec_sig_components if p)
+
     # Handle experiment tracking paths and SLURM header generation
     if not experiment_cfg:
         exp_name = "noexp"
@@ -280,15 +287,19 @@ cd "{exec_dir}" || exit 1
 
 indicator="SINGLE"
 
+EXEC_SIG="{exec_sig_str}"
+exec_hash=$(printf '%s' "$EXEC_SIG" | md5sum | cut -d ' ' -f 1)
+
 # Checkpoint check
-CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}.done"
+CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{exec_hash}}.done"
 if [ -f "$CHECKPOINT_FILE" ]; then
-    echo "[CHECKPOINT] $indicator previously completed. Exiting."
+    echo "[CHECKPOINT] Configuration previously completed. Exiting."
     exit 0
 fi
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Single Run (loopQ = false)"
+echo "Working Directory: {exec_dir}"
 echo "Flags: {fixed_args_str}"
 echo "================================================================"
 
@@ -345,8 +356,11 @@ indicator="SINGLE"
 # Navigate to executable directory to preserve repo/git context
 cd "{exec_dir}" || exit 1
 
+EXEC_SIG="{exec_sig_str}"
+
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
+echo "Working Directory: {exec_dir}"
 echo "Fixed Args: {fixed_args_str}"
 echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
@@ -357,8 +371,8 @@ while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
 
-    # Generate an MD5 hash of the line's contents
-    line_hash=$(echo -n "$line" | md5sum | cut -d ' ' -f 1)
+    # Generate an MD5 hash combining line's contents and execution signature
+    line_hash=$(printf '%s' "$EXEC_SIG $line" | md5sum | cut -d ' ' -f 1)
     
     indicator="L${{line_no}}"
 
@@ -466,6 +480,8 @@ done < "{target_inner_file}"
 # Navigate to executable directory to preserve repo/git context
 cd "{exec_dir}" || exit 1
 
+EXEC_SIG="{exec_sig_str}"
+
 # Parameter mapping arrays built by orchestrator.py
 OUTER_ARGS=(
 {args_array_block}
@@ -488,6 +504,7 @@ target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
 
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
+echo "Working Directory: {exec_dir}"
 echo "Fixed Args: {fixed_args_str}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
@@ -500,8 +517,8 @@ while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
 
-    # Generate an MD5 hash of the inner line AND the outer arguments
-    combo_hash=$(echo -n "$outer_args_str $line" | md5sum | cut -d ' ' -f 1)
+    # Generate an MD5 hash of the inner line, outer arguments AND the execution signature
+    combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $line" | md5sum | cut -d ' ' -f 1)
     
     indicator="A${{TASK_ID}}_L${{line_no}}"
 
