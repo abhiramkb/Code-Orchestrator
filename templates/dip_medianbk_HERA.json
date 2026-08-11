@@ -1,5 +1,4 @@
 {
-  "loopQ": false,
   "slurm": {
     "account": "lappi",
     "job-name": "dip_HERA",
