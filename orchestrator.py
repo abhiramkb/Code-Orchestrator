@@ -7,11 +7,33 @@ import sys
 from pathlib import Path
 import subprocess
 import re
+import os
+import sqlite3
+
+def get_dict_from_config_file(config_path) -> dict:
+    config_file = Path(config_path)
+    if not config_file.is_file():
+        print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    with open(config_file) as f:
+        try:
+            cfg = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
+            sys.exit(1)
+    return cfg
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
+
+    mode_index = 0 # 0 -> no loops, 1 -> inner loop only, 2 -> inner and outer loops
+    
     if "loopQ" in cfg:
-        return bool(cfg["loopQ"])
+        mode_index = 1
+        if "outer_loops" in cfg:
+            mode_index = 2
+        return True, mode_index
     
     # If loopQ is missing, check if loop options are absent while args is present
     has_inner = "inner_loop" in cfg
@@ -21,9 +43,14 @@ def determine_loop_q(cfg: dict) -> bool:
     has_execution = "execution" in cfg
 
     if not has_inner and not has_outer and has_args and has_slurm and has_execution:
-        return False
+        return False, mode_index
 
-    return True
+    if has_inner:
+        mode_index = 1
+        if has_outer:
+            mode_index = 2
+
+    return True, mode_index
 
 
 def validate_config(cfg: dict, config_path: str):
@@ -31,7 +58,7 @@ def validate_config(cfg: dict, config_path: str):
     errors = []
 
     # 1. Validate top-level keys
-    loop_q = determine_loop_q(cfg)
+    (loop_q, mode_index) = determine_loop_q(cfg)
     
     if "args" in cfg and not isinstance(cfg["args"], dict):
         errors.append("'args' must be an object (key-value pairs).")
@@ -126,23 +153,13 @@ def validate_config(cfg: dict, config_path: str):
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
-
+    return mode_index
 
 def generate_slurm_script(config_path, dryrunQ):
-    config_file = Path(config_path)
-    if not config_file.is_file():
-        print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    with open(config_file) as f:
-        try:
-            cfg = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
-            sys.exit(1)
+    cfg = get_dict_from_config_file(config_path)
 
     # Perform pre-flight validation
-    validate_config(cfg, config_path)
+    mode_index = validate_config(cfg, config_path)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
     loop_q = determine_loop_q(cfg)
@@ -580,7 +597,7 @@ wait
 
     return script_file
 
-def extract_config_flags(cfg: dict) -> set[str]:
+def extract_config_flags(cfg: dict) -> tuple[set[str], set[str]]:
     """Collects all argument keys across all configuration sections and converts them to CLI flags.
     CAUTION: Code assumes single letter args also use the "--<arg>" convention.
     """
@@ -625,7 +642,7 @@ def extract_config_flags(cfg: dict) -> set[str]:
             flag = key_str
         formatted_flags.add(flag)
 
-    return formatted_flags
+    return formatted_flags, raw_keys
 
 def validate_script_args(config_path) -> tuple[bool, list[str]]:
     """Validates if arguments defined in the config dictionary are supported by the target executable via --help.
@@ -633,17 +650,7 @@ def validate_script_args(config_path) -> tuple[bool, list[str]]:
     Returns:
         tuple[bool, list[str]]: (is_valid, list_of_unsupported_flags)
     """
-    config_file = Path(config_path)
-    if not config_file.is_file():
-        print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    with open(config_file) as f:
-        try:
-            cfg = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
-            sys.exit(1)
+    cfg = get_dict_from_config_file(config_path)
     
     exec_cfg = cfg.get("execution", {})
     interpreter = exec_cfg.get("language", "")
@@ -656,7 +663,7 @@ def validate_script_args(config_path) -> tuple[bool, list[str]]:
         )
 
     # Collect flags planned across all modes
-    flags_to_check = extract_config_flags(cfg)
+    flags_to_check, _ = extract_config_flags(cfg)
     if not flags_to_check:
         return True, []
 
@@ -728,6 +735,183 @@ def submit_slurm_script(script_path: Path, config_path, checkargsQ):
         print("[ERROR] 'sbatch' command not found. Are you on a SLURM cluster node?", file=sys.stderr)
         sys.exit(1)
 
+# Collection function from https://share.gemini.google/ldX5zTud8zOv
+def collect_slurm_results_to_db(config_path: str) -> None:
+    """Collects SLURM job execution results and metadata into a SQLite database.
+
+    Args:
+        config_path (str): Path to the orchestrator JSON configuration file.
+    """
+    # 1. Load configuration file
+    config = get_dict_from_config_file(config_path)
+
+    exp_cfg = config["experiment"]
+    result_db_path = exp_cfg["result_database_path"]
+    exp_name = exp_cfg["experiment_name"]
+    slurm_output_dir = exp_cfg["slrm_output_dir"]
+
+    # Parent directory for results and SLURM logs path
+    exp_dir = os.path.join(result_db_path, exp_name)
+    slurm_dir = os.path.join(exp_dir, slurm_output_dir)
+    db_file_path = os.path.join(exp_dir, "results.db")
+
+    if not os.path.exists(slurm_dir):
+        raise FileNotFoundError(
+            f"SLURM output directory not found: {slurm_dir}"
+        )
+
+    records = []
+
+    # 2. Iterate through files in the SLURM output directory
+    for filename in os.listdir(slurm_dir):
+        file_path = os.path.join(slurm_dir, filename)
+        if not os.path.isfile(file_path):
+            continue
+
+        # Extract job_id from filename pattern: <experiment_name>_<job_id>
+        job_id_match = re.search(rf"{re.escape(exp_name)}_(\d+)", filename)
+        if not job_id_match:
+            continue
+        job_id = job_id_match.group(1)
+
+        # 3. Parse SLURM log file for indicator and duration
+        indicator = None
+        duration = None
+
+        with open(file_path, "r") as log_file:
+            for line in log_file:
+                # Match for duration pattern: [<indicator>_out] Job duration: <duration> seconds
+                dur_match = re.search(
+                    r"\[(.*?)_out\]\s*Job duration:\s*([\d\.]+)\s*seconds", line
+                )
+                if dur_match:
+                    indicator = dur_match.group(1)
+                    duration = float(dur_match.group(2))
+                    break
+
+                # Fallback: extract indicator from [<indicator>_out] if duration line isn't read yet
+                if not indicator:
+                    ind_match = re.search(r"\[(.*?)_out\]", line)
+                    if ind_match:
+                        indicator = ind_match.group(1)
+
+        if not indicator:
+            print(
+                f"[Warning] Could not extract indicator from log: {filename}"
+            )
+            continue
+
+        # 4. Identify the result directory (<job_id>_<indicator>) in parent folder
+        target_dir_name = f"{job_id}_{indicator}"
+        target_dir = os.path.join(exp_dir, target_dir_name)
+
+        # Direct fallback check if indicator already contains job_id
+        if not os.path.exists(target_dir):
+            alt_target_dir = os.path.join(exp_dir, indicator)
+            if os.path.exists(alt_target_dir):
+                target_dir = alt_target_dir
+            else:
+                print(
+                    f"[Warning] Target result directory not found: {target_dir}"
+                )
+                continue
+
+        # 5. Locate and flatten the JSON file starting with "result"
+        json_file_path = None
+        for fname in os.listdir(target_dir):
+            if fname.startswith("result") and fname.endswith(".json"):
+                json_file_path = os.path.join(target_dir, fname)
+                break
+
+        if not json_file_path or not os.path.exists(json_file_path):
+            print(
+                f"[Warning] No result JSON file found in directory: {target_dir}"
+            )
+            continue
+
+        with open(json_file_path, "r") as jf:
+            json_raw = json.load(jf)
+
+        # Helper function to recursively extract flat key-value pairs
+        def flatten_json(data):
+            flat = {}
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    flat.update(flatten_json(v))
+                else:
+                    flat[k] = v
+            return flat
+
+        flat_data = flatten_json(json_raw)
+
+        # Append structured record
+        records.append(
+            {
+                "job_id": job_id,
+                "json_data": flat_data,
+                "job_duration": duration,
+            }
+        )
+
+    if not records:
+        print("No valid job execution records found to write to database.")
+        return
+
+    # 6. Prepare unique dynamic columns across all result files
+    all_json_keys = []
+    for rec in records:
+        for key in rec["json_data"].keys():
+            if key not in all_json_keys:
+                all_json_keys.append(key)
+
+    # First column: job_id | Middle columns: json fields | Last column: job_duration
+    column_names = ["job_id"] + all_json_keys + ["job_duration"]
+
+    # 7. Create/Update SQLite database
+    conn = sqlite3.connect(db_file_path)
+    cursor = conn.cursor()
+
+    # Define table schema dynamically
+    col_definitions = ['"job_id" TEXT PRIMARY KEY']
+    for k in all_json_keys:
+        col_definitions.append(f'"{k}" TEXT')
+    col_definitions.append('"job_duration" REAL')
+
+    create_table_sql = (
+        f"CREATE TABLE IF NOT EXISTS runs ({', '.join(col_definitions)});"
+    )
+    cursor.execute(create_table_sql)
+
+    # Insert or replace records into database
+    quoted_cols = [f'"{c}"' for c in column_names]
+    placeholders = [
+        "?" for _ in column_names
+    ]  # SQL parameterized placeholders
+
+    insert_sql = f"""
+        INSERT OR REPLACE INTO runs ({', '.join(quoted_cols)})
+        VALUES ({', '.join(placeholders)})
+    """
+
+    rows_to_insert = []
+    for rec in records:
+        row = [rec["job_id"]]
+        for key in all_json_keys:
+            val = rec["json_data"].get(key, None)
+            if isinstance(val, (dict, list)):
+                val = json.dumps(val)
+            row.append(val)
+        row.append(rec["job_duration"])
+        rows_to_insert.append(row)
+
+    cursor.executemany(insert_sql, rows_to_insert)
+
+    conn.commit()
+    conn.close()
+    print(
+        f"Successfully written {len(rows_to_insert)} run(s) to database: {db_file_path}"
+    )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate and submit SLURM scripts from a JSON config.")
     parser.add_argument(
@@ -751,7 +935,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable checking of whether args passed to the executable are supported."
     )
+    parser.add_argument(
+        "--collect",
+        action="store_true",
+        help="Collects results from finished SLURM jobs."
+    )
     args = parser.parse_args()
+
+
+    #cfg = get_dict_from_config_file(args.config)
+    #_,result = extract_config_flags(cfg)
+    #print(result)
+    #exit()
+
+    if args.collect:
+        collect_slurm_results_to_db(args.config)
+        exit()
 
     checkargsQ = not args.noargcheck
     
