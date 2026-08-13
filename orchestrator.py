@@ -735,7 +735,7 @@ def submit_slurm_script(script_path: Path, config_path, checkargsQ):
         print("[ERROR] 'sbatch' command not found. Are you on a SLURM cluster node?", file=sys.stderr)
         sys.exit(1)
 
-# Collection function from https://share.gemini.google/ldX5zTud8zOv
+# Collection function from https://share.gemini.google/ldX5zTud8zOv, https://share.gemini.google/IEM7GOQgmFCx
 def collect_slurm_results_to_db(config_path: str) -> None:
     """Collects SLURM job execution results and metadata into a SQLite database.
 
@@ -762,96 +762,92 @@ def collect_slurm_results_to_db(config_path: str) -> None:
 
     records = []
 
+    # Helper function to recursively extract flat key-value pairs
+    def flatten_json(data):
+        flat = {}
+        for k, v in data.items():
+            if isinstance(v, dict):
+                flat.update(flatten_json(v))
+            else:
+                flat[k] = v
+        return flat
+
     # 2. Iterate through files in the SLURM output directory
     for filename in os.listdir(slurm_dir):
         file_path = os.path.join(slurm_dir, filename)
         if not os.path.isfile(file_path):
             continue
+        else:
+            print("Processing file: ",filename)
 
         # Extract job_id from filename pattern: <experiment_name>_<job_id>
         job_id_match = re.search(rf"{re.escape(exp_name)}_(\d+)", filename)
         if not job_id_match:
             continue
-        job_id = job_id_match.group(1)
+        base_job_id = job_id_match.group(1)
+        print("Extracted job_id: ", base_job_id)
 
-        # 3. Parse SLURM log file for indicator and duration
-        indicator = None
-        duration = None
-
+        # 3. Parse SLURM log file for ALL (indicator, duration) instances
+        sub_jobs = []
         with open(file_path, "r") as log_file:
             for line in log_file:
-                # Match for duration pattern: [<indicator>_out] Job duration: <duration> seconds
                 dur_match = re.search(
                     r"\[(.*?)_out\]\s*Job duration:\s*([\d\.]+)\s*seconds", line
                 )
                 if dur_match:
                     indicator = dur_match.group(1)
                     duration = float(dur_match.group(2))
-                    break
+                    sub_jobs.append((indicator, duration))
 
-                # Fallback: extract indicator from [<indicator>_out] if duration line isn't read yet
-                if not indicator:
-                    ind_match = re.search(r"\[(.*?)_out\]", line)
-                    if ind_match:
-                        indicator = ind_match.group(1)
-
-        if not indicator:
+        if not sub_jobs:
             print(
-                f"[Warning] Could not extract indicator from log: {filename}"
+                f"[Warning] No completed job durations found in log: {filename}"
             )
             continue
+        # 4. Process each sub-job instance found in the log file
+        for indicator, duration in sub_jobs:
+            target_dir_name = f"{base_job_id}_{indicator}"
+            target_dir = os.path.join(exp_dir, target_dir_name)
 
-        # 4. Identify the result directory (<job_id>_<indicator>) in parent folder
-        target_dir_name = f"{job_id}_{indicator}"
-        target_dir = os.path.join(exp_dir, target_dir_name)
+            # Direct fallback check if directory name differs
+            if not os.path.exists(target_dir):
+                alt_target_dir = os.path.join(exp_dir, indicator)
+                if os.path.exists(alt_target_dir):
+                    target_dir = alt_target_dir
+                else:
+                    print(
+                        f"[Warning] Target result directory not found: {target_dir}"
+                    )
+                    continue
 
-        # Direct fallback check if indicator already contains job_id
-        if not os.path.exists(target_dir):
-            alt_target_dir = os.path.join(exp_dir, indicator)
-            if os.path.exists(alt_target_dir):
-                target_dir = alt_target_dir
-            else:
+            # 5. Locate and flatten the JSON file starting with "result"
+            json_file_path = None
+            for fname in os.listdir(target_dir):
+                if fname.startswith("result") and fname.endswith(".json"):
+                    json_file_path = os.path.join(target_dir, fname)
+                    break
+
+            if not json_file_path or not os.path.exists(json_file_path):
                 print(
-                    f"[Warning] Target result directory not found: {target_dir}"
+                    f"[Warning] No result JSON file found in directory: {target_dir}"
                 )
                 continue
 
-        # 5. Locate and flatten the JSON file starting with "result"
-        json_file_path = None
-        for fname in os.listdir(target_dir):
-            if fname.startswith("result") and fname.endswith(".json"):
-                json_file_path = os.path.join(target_dir, fname)
-                break
+            with open(json_file_path, "r") as jf:
+                json_raw = json.load(jf)
 
-        if not json_file_path or not os.path.exists(json_file_path):
-            print(
-                f"[Warning] No result JSON file found in directory: {target_dir}"
+            flat_data = flatten_json(json_raw)
+
+            # Store job identifier as <job_id>_<indicator> (e.g. 590721_L1)
+            job_identifier = f"{base_job_id}_{indicator}"
+
+            records.append(
+                {
+                    "job_id": job_identifier,
+                    "json_data": flat_data,
+                    "job_duration": duration,
+                }
             )
-            continue
-
-        with open(json_file_path, "r") as jf:
-            json_raw = json.load(jf)
-
-        # Helper function to recursively extract flat key-value pairs
-        def flatten_json(data):
-            flat = {}
-            for k, v in data.items():
-                if isinstance(v, dict):
-                    flat.update(flatten_json(v))
-                else:
-                    flat[k] = v
-            return flat
-
-        flat_data = flatten_json(json_raw)
-
-        # Append structured record
-        records.append(
-            {
-                "job_id": job_id,
-                "json_data": flat_data,
-                "job_duration": duration,
-            }
-        )
 
     if not records:
         print("No valid job execution records found to write to database.")
@@ -864,14 +860,13 @@ def collect_slurm_results_to_db(config_path: str) -> None:
             if key not in all_json_keys:
                 all_json_keys.append(key)
 
-    # First column: job_id | Middle columns: json fields | Last column: job_duration
+    # First column: job_id | Middle: json fields | Last: job_duration
     column_names = ["job_id"] + all_json_keys + ["job_duration"]
 
     # 7. Create/Update SQLite database
     conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
 
-    # Define table schema dynamically
     col_definitions = ['"job_id" TEXT PRIMARY KEY']
     for k in all_json_keys:
         col_definitions.append(f'"{k}" TEXT')
@@ -882,11 +877,8 @@ def collect_slurm_results_to_db(config_path: str) -> None:
     )
     cursor.execute(create_table_sql)
 
-    # Insert or replace records into database
     quoted_cols = [f'"{c}"' for c in column_names]
-    placeholders = [
-        "?" for _ in column_names
-    ]  # SQL parameterized placeholders
+    placeholders = ["?" for _ in column_names]
 
     insert_sql = f"""
         INSERT OR REPLACE INTO runs ({', '.join(quoted_cols)})
