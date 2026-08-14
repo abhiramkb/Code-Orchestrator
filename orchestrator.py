@@ -157,7 +157,8 @@ def validate_config(cfg: dict, config_path: str):
 
 def generate_slurm_script(config_path, dryrunQ):
     cfg = get_dict_from_config_file(config_path)
-
+    config_file = Path(config_path) # Storing config file path in case it is needed
+    
     # Perform pre-flight validation
     mode_index = validate_config(cfg, config_path)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
