@@ -261,6 +261,37 @@ mkdir -p "$CHECKPOINT_DIR"
 """
         exp_args_block = '\n    exp_args=""'
 
+    # Helper Bash function definition to parse and print arguments with indicator prefix
+    print_args_def = """
+# Function to parse and display command-line arguments to SLURM output
+print_args() {
+    local ind="$1"
+    shift
+    local args_str="$*"
+    if [ -z "$args_str" ]; then
+        return
+    fi
+    eval "set -- $args_str"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --*)
+                local param_name="${1#--}"
+                if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
+                    echo "[${ind}_args] ${param_name}: $2"
+                    shift 2
+                else
+                    echo "[${ind}_args] ${param_name}: "
+                    shift 1
+                fi
+                ;;
+            *)
+                shift 1
+                ;;
+        esac
+    done
+}
+"""
+
     # Extract job array throttling if provided
     max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
 
@@ -290,9 +321,6 @@ mkdir -p "$CHECKPOINT_DIR"
     # SINGLE RUN MODE (loopQ == False)
     # =========================================================================
     if not loop_q:
-        #args_cfg = cfg.get("args", {})
-        #args_str = " ".join(f"--{k} {v}" for k, v in args_cfg.items())
-        #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} {args_str}".strip()
         cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str]
         exec_cmd = " ".join(p for p in cmd_parts if p)
 
@@ -301,6 +329,7 @@ mkdir -p "$CHECKPOINT_DIR"
 {experiment_env_block}
 {module_load_block}
 {env_var_block}
+{print_args_def}
 
 # Navigate to executable directory to preserve repo/git context
 cd "{exec_dir}" || exit 1
@@ -327,6 +356,8 @@ echo "================================================================"
 indicator="SINGLE"
 {exp_args_block}
 
+print_args "$indicator" "{fixed_args_str} $exp_args"
+
 {{
     starttime=$(date +%s%N)
     echo "Job started at: $(date)"
@@ -349,7 +380,6 @@ indicator="SINGLE"
 
 wait
 """
-        #script_file = Path("submit_single.sh")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         script_file = Path(f"submit_single_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
@@ -364,8 +394,6 @@ wait
 
     if not outer_cfg:
         target_inner_file = str(Path(inner_cfg["file_path"]).resolve())
-        #target_inner_file = inner_cfg["file_path"]
-        #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $inner_args_str".strip()
         # Add fixed_args_str before inner loop arguments
         cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$inner_args_str"]
         exec_cmd = " ".join(p for p in cmd_parts if p)
@@ -375,6 +403,7 @@ wait
 {experiment_env_block}
 {module_load_block}
 {env_var_block}
+{print_args_def}
 
 # Navigate to executable directory to preserve repo/git context
 cd "{exec_dir}" || exit 1
@@ -418,6 +447,8 @@ while read -r line || [ -n "$line" ]; do
 
         script_content += f"""{exp_args_block}
 
+    print_args "$indicator" "{fixed_args_str} $inner_args_str $exp_args"
+
     {{
         starttime=$(date +%s%N)
         echo "Job started at: $(date)"
@@ -443,7 +474,6 @@ done < "{target_inner_file}"
 
 wait
 """
-        #script_file = Path("submit_inner.sh")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         script_file = Path(f"submit_inner_{exp_name}_{timestamp}.sh")
         script_file.write_text(script_content)
@@ -502,6 +532,7 @@ wait
 {experiment_env_block}
 {module_load_block}
 {env_var_block}
+{print_args_def}
 
 # Navigate to executable directory to preserve repo/git context
 cd "{exec_dir}" || exit 1
@@ -565,6 +596,8 @@ while read -r line || [ -n "$line" ]; do
 
     script_content += f"""{exp_args_block}
 
+    print_args "$indicator" "{fixed_args_str} $outer_args_str $inner_args_str $exp_args"
+
     {{
         starttime=$(date +%s%N)
         echo "Job started at: $(date)"
@@ -590,7 +623,6 @@ done < "$target_inner_file"
 wait
 """
 
-    #script_file = Path("submit_array.sh")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     script_file = Path(f"submit_array_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
@@ -737,6 +769,8 @@ def submit_slurm_script(script_path: Path, config_path, checkargsQ):
         sys.exit(1)
 
 # Collection function from https://share.gemini.google/ldX5zTud8zOv, https://share.gemini.google/IEM7GOQgmFCx
+# Note that this function is specific to the NLODiffraction project. A more general collection function needs
+# to be developed.
 def collect_slurm_results_to_db(config_path: str) -> None:
     """Collects SLURM job execution results and metadata into a SQLite database.
 
