@@ -38,8 +38,6 @@
   },
   "args": {
     "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
-    "Csq": 915,
-    "xmax": 160.0,
-    "neval": 1e7
+    "xmax": 160.0
   }
 }
