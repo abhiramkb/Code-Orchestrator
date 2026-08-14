@@ -1,0 +1,41 @@
+{
+  "slurm": {
+    "account": "lappi",
+    "job-name": "diptrip_HERA",
+    "partition": "gpumedium",
+    "nodes": 1,
+    "ntasks": 1,
+    "time": "23:59:00",
+    "cpus-per-task": 72,
+    "gres": "gpu:gh200:1",
+    "output": "slurm_%j.log"
+  },
+  "execution": {
+    "language": "python",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-trip/sf_nlo_sdaw_diptrip_T.py",
+    "modules": [
+      "python-tensorflow"
+    ],
+    "env_vars": {}
+  },
+  "experiment": {
+    "result_database_path": "/projappl/lappi/abhiram/diptrip_database",
+    "experiment_name": "median_mvgam_balsd",
+    "slrm_output_dir": "SLURM_OUTPUT",
+    "tracking_args": {
+         "save_dir": "{save_dir}_{__indicator}",
+         "json": "{save_dir}_{__indicator}/result.json"
+    }
+  },
+  "inner_loop": {
+    "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_lowQ_smallx.txt",
+    "delimiter": " ",
+    "arg_names": ["Q", "beta", "x"]
+  },
+  "args": {
+    "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
+    "Csq": 915,
+    "xmax": 160.0,
+    "neval": 4e8
+  }
+}
