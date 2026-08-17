@@ -888,14 +888,22 @@ def collect_slurm_results_to_db(config_path: str) -> None:
         print("No valid job execution records found to write to database.")
         return
 
-    # 6. Prepare unique dynamic columns across all result files
-    all_json_keys = []
+    # 6. Prepare unique dynamic columns and infer their SQLite types
+    key_types = {}
     for rec in records:
-        for key in rec["json_data"].keys():
-            if key not in all_json_keys:
-                all_json_keys.append(key)
+        for key, val in rec["json_data"].items():
+            if key not in key_types or key_types[key] == "TEXT":
+                if isinstance(val, bool):
+                    # SQLite doesn't have a native BOOL type; stored as INTEGER (0/1)
+                    key_types[key] = "INTEGER"
+                elif isinstance(val, int):
+                    key_types[key] = "INTEGER"
+                elif isinstance(val, float):
+                    key_types[key] = "REAL"
+                else:
+                    key_types[key] = "TEXT"
 
-    # First column: job_id | Middle: json fields | Last: job_duration
+    all_json_keys = list(key_types.keys())
     column_names = ["job_id"] + all_json_keys + ["job_duration"]
 
     # 7. Create/Update SQLite database
@@ -904,7 +912,8 @@ def collect_slurm_results_to_db(config_path: str) -> None:
 
     col_definitions = ['"job_id" TEXT PRIMARY KEY']
     for k in all_json_keys:
-        col_definitions.append(f'"{k}" TEXT')
+        col_type = key_types.get(k, "TEXT")
+        col_definitions.append(f'"{k}" {col_type}')
     col_definitions.append('"job_duration" REAL')
 
     create_table_sql = (
@@ -927,6 +936,8 @@ def collect_slurm_results_to_db(config_path: str) -> None:
             val = rec["json_data"].get(key, None)
             if isinstance(val, (dict, list)):
                 val = json.dumps(val)
+            elif isinstance(val, bool):
+                val = int(val)
             row.append(val)
         row.append(rec["job_duration"])
         rows_to_insert.append(row)
