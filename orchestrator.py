@@ -436,6 +436,7 @@ while read -r line || [ -n "$line" ]; do
     CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
     if [ -f "$CHECKPOINT_FILE" ]; then
         echo "[CHECKPOINT] Skipping $indicator - already completed."
+        echo "[CHECKPOINT] Hash: ${{line_hash}}"
         continue
     fi
 
@@ -833,6 +834,18 @@ def collect_slurm_results_to_db(config_path: str) -> None:
                     indicator = dur_match.group(1)
                     duration = float(dur_match.group(2))
                     sub_jobs.append((indicator, duration))
+                # In case some jobs are skipped over due to an existing checkpoint but somehow they still have subfolders matching the current job id (not sure how that happened but here we are), I want to check the indicators that have been skipped, add them to the sub_jobs list with the duration as NULL.
+                checkpoint_match = re.search(
+                    r"\[CHECKPOINT\]\sSkipping\s(.*?) - already completed\.", line
+                )
+                if checkpoint_match:
+                    indicator = checkpoint_match.group(1)
+                    duration = None
+                    print(
+                        f"[Warning] Recording \"Null\" duration for skipped job"
+                    )
+                    sub_jobs.append((indicator, duration))
+
 
         if not sub_jobs:
             print(
