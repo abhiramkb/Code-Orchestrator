@@ -22,7 +22,8 @@
     "ntasks": 1,
     "time": "00:15:00",
     "cpus-per-task": 8,
-    "output": "slurm_%j.log"
+    "output": "slurm_%j.log",
+    "max_concurrent_tasks": 2
   },
   "experiment": {
     "result_database_path": "/projappl/lappi/abhiram/config_test_db",

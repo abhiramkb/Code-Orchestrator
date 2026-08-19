@@ -1,17 +1,39 @@
 from pathlib import Path
 import itertools
+from typing import Any, Dict, List, Optional, Tuple
 
-def build_exec_command(exec_cfg: dict, flags_str: str, fixed_args_str: str, extra_args_str: str) -> str:
-    """
-    Constructs the full execution command string.
-    extra_args_str can be something like "$inner_args_str" or "$outer_args_str $inner_args_str".
-    """
-    cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, extra_args_str]
+from config_schema import (
+    ExecutionConfig,
+    ExplicitOuterLoop,
+    InnerLoopConfig,
+    OuterLoopBlock,
+    RangeOuterLoop,
+    TabularOuterLoop,
+)
+
+def build_exec_command(
+    exec_cfg: ExecutionConfig,
+    flags_str: str,
+    fixed_args_str: str,
+    extra_args_str: str,
+) -> str:
+    """Constructs the full execution command string using ExecutionConfig model attributes."""
+    cmd_parts = [
+        exec_cfg.language,
+        flags_str,
+        str(exec_cfg.executable),
+        fixed_args_str,
+        extra_args_str,
+    ]
+
     return " ".join(p for p in cmd_parts if p)
 
-def build_single_mode(ctx: dict) -> str:
-    """Mode 1: Non-looped execution script generator."""
-    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "")
+
+def build_single_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
+    """Mode 0: Non-looped execution script generator."""
+    exec_cmd = build_exec_command(
+        ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], ""
+    )
     return f"""{ctx['common_header']}
 
 # Navigate to executable directory to preserve repo/git context
@@ -64,15 +86,22 @@ print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 wait
 """
 
+def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
+    """Mode 1: Inner-loop-only script generator using InnerLoopConfig model."""
+    
+    inner_cfg = config.inner_loop
+    
+    if inner_cfg.file_path is None:
+        raise ValueError("InnerLoopConfig.file_path cannot be None for Inner Loop Mode.")
 
-def build_inner_loop_mode(ctx: dict, inner_cfg: dict) -> str:
-    """Mode 2: Inner-loop-only script generator."""
-    target_inner_file = str(Path(inner_cfg["file_path"]).resolve())
-    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "$inner_args_str")
+    target_inner_file = str(inner_cfg.file_path.resolve())
+    exec_cmd = build_exec_command(
+        ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], "$inner_args_str"
+    )
 
     arg_mapping = "\n".join(
         f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
-        for idx, arg_name in enumerate(inner_cfg["arg_names"])
+        for idx, arg_name in enumerate(inner_cfg.arg_names)
     )
 
     return f"""{ctx['common_header']}
@@ -88,7 +117,7 @@ echo "Working Directory: {ctx['exec_dir']}"
 echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Loop Source File: {target_inner_file}"
-echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
+echo "Inner Args: {', '.join(inner_cfg.arg_names)}"
 echo "================================================================"
 
 line_no=0
@@ -140,75 +169,67 @@ done < "{target_inner_file}"
 wait
 """
 
+def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
+    """Helper to evaluate a typed outer loop Pydantic block into argument dicts."""
+    if isinstance(block, ExplicitOuterLoop):
+        return [{block.arg_name: val} for val in block.values]
 
-def _evaluate_outer_block(block: dict) -> list[dict]:
-    """Helper to evaluate an outer loop block into a list of argument dicts."""
-    block_type = block.get("type", "explicit")
-
-    if block_type == "explicit":
-        arg_name = block["arg_name"]
-        return [{arg_name: val} for val in block["values"]]
-
-    elif block_type == "range":
-        arg_name = block["arg_name"]
-        start = block["start"]
-        stop = block["stop"]
-        step = block.get("step", 1)
-        
+    elif isinstance(block, RangeOuterLoop):
+        arg_name = block.arg_name
+        start, stop, step = block.start, block.stop, block.step
         values = []
-        curr = start
-        if isinstance(step, float) or isinstance(start, float) or isinstance(stop, float):
+
+        if any(isinstance(x, float) for x in (start, stop, step)):
+            curr = start
             while (step > 0 and curr < stop) or (step < 0 and curr > stop):
                 values.append(round(curr, 10))
                 curr += step
         else:
-            values = list(range(start, stop, step))
-            
+            values = list(range(int(start), int(stop), int(step)))
+
         return [{arg_name: val} for val in values]
 
-    elif block_type == "tabular_file":
-        file_path = block["file_path"]
-        delimiter = block.get("delimiter")
-        comment_prefix = block.get("comment_prefix", "#")
-        skip_blank = block.get("skip_blank_lines", True)
-        args_spec = block.get("args", [])
-
+    elif isinstance(block, TabularOuterLoop):
         rows = []
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(block.file_path, "r", encoding="utf-8") as f:
             for line in f:
                 line_str = line.strip()
-                if skip_blank and not line_str:
+                if block.skip_blank_lines and not line_str:
                     continue
-                if comment_prefix and line_str.startswith(comment_prefix):
+                if block.comment_prefix and line_str.startswith(block.comment_prefix):
                     continue
 
-                if delimiter and delimiter != " ":
-                    cols = [c.strip() for c in line_str.split(delimiter)]
+                if block.delimiter and block.delimiter != " ":
+                    cols = [c.strip() for c in line_str.split(block.delimiter)]
                 else:
                     cols = line_str.split()
 
                 row_dict = {}
-                for arg in args_spec:
-                    raw_val = cols[arg["column"]]
-                    if "template" in arg:
-                        val = arg["template"].format(val=raw_val)
+                for arg_spec in block.args:
+                    raw_val = cols[arg_spec.column]
+                    if arg_spec.template:
+                        val = arg_spec.template.format(val=raw_val)
                     else:
                         val = raw_val
-                    row_dict[arg["arg_name"]] = val
+                    row_dict[arg_spec.arg_name] = val
 
                 rows.append(row_dict)
         return rows
 
-    else:
-        raise ValueError(f"Unsupported outer_loop block type: '{block_type}'")
+    raise ValueError(f"Unsupported outer_loop block type: '{type(block)}'")
 
 # Outer array with increase flexibility: https://share.gemini.google/pVLNoK7EKGXq
-def build_job_array_mode(ctx: dict, inner_cfg: dict, outer_cfg: list, max_concurrent: int) -> tuple[str, int]:
-    """Mode 3: Outer + Inner loop SLURM Job Array script generator."""
-    # 1. Evaluate each block into a list of argument dictionaries
+def build_job_array_mode(
+    ctx: Dict[str, Any], config: AppConfig,
+    max_concurrent: Optional[int] = None,
+) -> Tuple[str, int]:
+    """Mode 2: Outer + Inner loop SLURM Job Array script generator."""
+    # 1. Evaluate each typed Pydantic block into a list of argument dictionaries
+    inner_cfg = config.inner_loop
+    outer_cfg = config.outer_loops
     evaluated_blocks = [_evaluate_outer_block(block) for block in outer_cfg]
 
-    # 2. Compute the Cartesian product across all outer loop blocks and merge dictionaries
+    # 2. Compute the Cartesian product across all outer loop blocks and merge
     outer_combinations = []
     for combo_tuple in itertools.product(*evaluated_blocks):
         merged_combo = {}
@@ -223,7 +244,7 @@ def build_job_array_mode(ctx: dict, inner_cfg: dict, outer_cfg: list, max_concur
         array_range += f"%{max_concurrent}"
 
     # Inject array SBATCH directive after #!/bin/bash
-    lines = ctx['common_header'].splitlines()
+    lines = ctx["common_header"].splitlines()
     lines.insert(1, f"#SBATCH --array={array_range}")
     header_with_array = "\n".join(lines)
 
@@ -233,30 +254,37 @@ def build_job_array_mode(ctx: dict, inner_cfg: dict, outer_cfg: list, max_concur
         outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
         outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
 
-        target_inner_file = inner_cfg.get("file_path")
+        target_inner_file = inner_cfg.file_path
         if target_inner_file:
-            target_inner_file = str(Path(target_inner_file).resolve())
+            target_inner_file_str = str(target_inner_file.resolve())
         else:
+            target_inner_file_str = ""
             for loop_cfg in outer_cfg:
-                arg_name = loop_cfg.get("arg_name")
-                val = combo_dict.get(arg_name)
-                if "inner_files" in loop_cfg and val in loop_cfg["inner_files"]:
-                    target_inner_file = loop_cfg["inner_files"][val]
+                arg_name = getattr(loop_cfg, "arg_name", None)
+                val = combo_dict.get(arg_name) if arg_name else None
+                inner_files = getattr(loop_cfg, "inner_files", None)
+                if inner_files and val in inner_files:
+                    target_inner_file_str = str(Path(inner_files[val]).resolve())
                     break
 
         bash_outer_args.append(f'    "{outer_args_str}"')
         bash_outer_descs.append(f'    "{outer_desc}"')
-        bash_target_files.append(f'    "{target_inner_file}"')
+        bash_target_files.append(f'    "{target_inner_file_str}"')
 
     args_array_block = "\n".join(bash_outer_args)
     descs_array_block = "\n".join(bash_outer_descs)
     files_array_block = "\n".join(bash_target_files)
 
-    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "$outer_args_str $inner_args_str")
+    exec_cmd = build_exec_command(
+        ctx["exec_cfg"],
+        ctx["flags_str"],
+        ctx["fixed_args_str"],
+        "$outer_args_str $inner_args_str",
+    )
 
     arg_mapping = "\n".join(
         f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
-        for idx, arg_name in enumerate(inner_cfg["arg_names"])
+        for idx, arg_name in enumerate(inner_cfg.arg_names)
     )
 
     script_content = f"""{header_with_array}
@@ -294,7 +322,7 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
 echo "Inner Loop Source File: $target_inner_file"
-echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
+echo "Inner Args: {', '.join(inner_cfg.arg_names)}"
 echo "======================================================================"
 
 line_no=0
