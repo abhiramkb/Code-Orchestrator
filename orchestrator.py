@@ -98,6 +98,52 @@ def validate_config(cfg: dict, config_path: str):
         outer_cfg = cfg.get("outer_loops", [])
         if not isinstance(outer_cfg, list):
             errors.append("'outer_loops' must be an array.")
+        else:
+            # Polymorphic Outer Loop Block Validation
+            for idx, o_loop in enumerate(outer_cfg):
+                if not isinstance(o_loop, dict):
+                    errors.append(f"'outer_loops[{idx}]' must be an object.")
+                    continue
+                
+                block_type = o_loop.get("type", "explicit")
+                
+                if block_type == "explicit":
+                    if "arg_name" not in o_loop or not isinstance(o_loop["arg_name"], str):
+                        errors.append(f"'outer_loops[{idx}]' (explicit) missing or invalid 'arg_name'.")
+                    if "values" not in o_loop or not isinstance(o_loop["values"], list):
+                        errors.append(f"'outer_loops[{idx}]' (explicit) missing or invalid 'values' array.")
+                
+                elif block_type == "range":
+                    if "arg_name" not in o_loop or not isinstance(o_loop["arg_name"], str):
+                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'arg_name'.")
+                    if "start" not in o_loop or not isinstance(o_loop["start"], (int, float)):
+                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'start' (must be a number).")
+                    if "stop" not in o_loop or not isinstance(o_loop["stop"], (int, float)):
+                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'stop' (must be a number).")
+                    if "step" in o_loop and not isinstance(o_loop["step"], (int, float)):
+                        errors.append(f"'outer_loops[{idx}]' (range) invalid 'step' (must be a number).")
+                
+                elif block_type == "tabular_file":
+                    if "file_path" not in o_loop or not isinstance(o_loop["file_path"], str):
+                        errors.append(f"'outer_loops[{idx}]' (tabular_file) missing or invalid 'file_path'.")
+                    else:
+                        tf_path = Path(o_loop["file_path"])
+                        #if not tf_path.is_file():
+                        #    errors.append(f"'outer_loops[{idx}]' tabular file does not exist: '{o_loop['file_path']}'")
+                    
+                    if "args" not in o_loop or not isinstance(o_loop["args"], list):
+                        errors.append(f"'outer_loops[{idx}]' (tabular_file) missing or invalid 'args' array.")
+                    else:
+                        for arg_idx, arg_spec in enumerate(o_loop["args"]):
+                            if not isinstance(arg_spec, dict):
+                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' must be an object.")
+                                continue
+                            if "arg_name" not in arg_spec or not isinstance(arg_spec["arg_name"], str):
+                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' missing or invalid 'arg_name'.")
+                            if "column" not in arg_spec or not isinstance(arg_spec["column"], int):
+                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' missing or invalid 'column' (must be an integer).")
+                else:
+                    errors.append(f"'outer_loops[{idx}]' has unknown type: '{block_type}'. Expected 'explicit', 'range', or 'tabular_file'.")
 
         # 3. Inner Loop Data File Verification
         if "inner_loop" in cfg and isinstance(cfg["inner_loop"], dict):
@@ -155,66 +201,37 @@ def validate_config(cfg: dict, config_path: str):
         sys.exit(1)
     return mode_index
 
-def generate_slurm_script(config_path, dryrunQ):
-    cfg = get_dict_from_config_file(config_path)
-    config_file = Path(config_path) # Storing config file path in case it is needed
-    
-    # Perform pre-flight validation
-    mode_index = validate_config(cfg, config_path)
-    print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
-    loop_q = determine_loop_q(cfg)
-    exec_cfg = cfg["execution"]
-    slurm_cfg = cfg["slurm"].copy()
-    experiment_cfg = cfg.get("experiment")
-
-    # Resolve executable path and directory to be able to properly obtain git context
-    exec_path = Path(exec_cfg["executable"]).resolve()
-    exec_dir = exec_path.parent
-
-    # Global fixed arguments passed in every run mode (looped/non-looped)
-    fixed_args_cfg = cfg.get("args", {})
-    fixed_args_list = []
-    for k, v in fixed_args_cfg.items():
+def format_cli_args(args_dict: dict) -> str:
+    """Formats key-value argument pairs into standard CLI flag strings."""
+    args_list = []
+    for k, v in args_dict.items():
         if isinstance(v, str):
-            fixed_args_list.append(f'--{k} \\"{v}\\"')
+            args_list.append(f'--{k} \\"{v}\\"')
         else:
-            fixed_args_list.append(f'--{k} {v}')
-    fixed_args_str = " ".join(fixed_args_list)
+            args_list.append(f'--{k} {v}')
+    return " ".join(args_list)
 
-    # Handle experiment tracking paths and SLURM header generation
+
+def build_experiment_strings(experiment_cfg: dict) -> tuple[str, str, str]:
+    """
+    Builds the environment block and argument block for experiment tracking.
+    Returns (exp_name, exp_env_block, exp_args_block).
+    If no experiment_cfg, returns fallback values.
+    """
     if not experiment_cfg:
-        exp_name = "noexp"
-    if experiment_cfg:
-        db_path = experiment_cfg["result_database_path"]
-        exp_name = experiment_cfg["experiment_name"]
-        slrm_output_dir_name = experiment_cfg["slrm_output_dir"]
-        
-        # SLURM output directory path: <result_database_path>/<experiment_name>/<slrm_output_dir>
-        full_slrm_output_dir = f"{db_path}/{exp_name}/{slrm_output_dir_name}"
-        
-        # Set SLURM standard output option: <full_slrm_output_dir>/<experiment_name>_%j.out
-        slurm_cfg["output"] = f"{full_slrm_output_dir}/{exp_name}_%j.out"
-        
-        # Ensure target SLURM output directory exists prior to job submission
-        try:
-            Path(full_slrm_output_dir).mkdir(parents=True, exist_ok=True)
-            print(f"[INFO] Ensured SLURM output directory exists: {full_slrm_output_dir}")
-        except Exception as e:
-            print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
+        exp_env_block = """
+export CHECKPOINT_DIR="./checkpoints"
+mkdir -p "$CHECKPOINT_DIR"
+"""
+        exp_args_block = '\n    exp_args=""'
+        return "noexp", exp_env_block, exp_args_block
 
-        # Copy configuration file to <result_database_path>/<experiment_name>/<datetime_string>/
-        if not dryrunQ:
-            datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_dir = Path(db_path) / exp_name / datetime_str
-            try:
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(config_file, backup_dir / config_file.name)
-                print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
-            except Exception as e:
-                print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
+    db_path = experiment_cfg["result_database_path"]
+    exp_name = experiment_cfg["experiment_name"]
+    slrm_output_dir_name = experiment_cfg["slrm_output_dir"]
 
-        experiment_env_block = f"""
+    exp_env_block = f"""
 # =========================================================================
 # EXPERIMENT TRACKING
 # =========================================================================
@@ -230,38 +247,78 @@ export CHECKPOINT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/checkpoints"
 mkdir -p "$SAVE_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 """
-        # Check for dynamic tracking arguments in config
-        tracking_args = experiment_cfg.get("tracking_args")
 
-        arg_components = []
-        if tracking_args is not None:
-          for key, val_template in tracking_args.items():
-              formatted_val = val_template 
-              # Translate placeholder keywords to bash variable syntaxes
-              formatted_val = formatted_val.replace("{result_database_path}", "${RESULT_DATABASE_PATH}")  
-              formatted_val = formatted_val.replace("{experiment_name}", "${EXPERIMENT_NAME}")
-              formatted_val = formatted_val.replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
-              formatted_val = formatted_val.replace("{save_dir}", "${SAVE_DIR}")
-              formatted_val = formatted_val.replace("{__indicator}", "${indicator}")
-                  
-              arg_components.append(f'--{key} \\"{formatted_val}\\"')
+    tracking_args = experiment_cfg.get("tracking_args")
+    arg_components = []
+    if tracking_args is not None:
+        for key, val_template in tracking_args.items():
+            formatted_val = (
+                val_template
+                .replace("{result_database_path}", "${RESULT_DATABASE_PATH}")
+                .replace("{experiment_name}", "${EXPERIMENT_NAME}")
+                .replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
+                .replace("{save_dir}", "${SAVE_DIR}")
+                .replace("{__indicator}", "${indicator}")
+            )
+            arg_components.append(f'--{key} \\"{formatted_val}\\"')
+    tracking_args_str = " ".join(arg_components)
 
-        tracking_args_str = " ".join(arg_components)
-
-        exp_args_block = f"""
+    exp_args_block = f"""
     exp_args=""
     if [ -n "${{SAVE_DIR:-}}" ]; then
         exp_args="{tracking_args_str}"
     fi"""
-    else:
-        # Fallback checkpoint directory if no experiment block is defined
-        experiment_env_block = """
-export CHECKPOINT_DIR="./checkpoints"
-mkdir -p "$CHECKPOINT_DIR"
-"""
-        exp_args_block = '\n    exp_args=""'
+    return exp_name, exp_env_block, exp_args_block
 
-    # Helper Bash function definition to parse and print arguments with indicator prefix
+
+def setup_experiment_directories(experiment_cfg: dict, slurm_cfg: dict, config_file: Path, dryrun_q: bool):
+    """
+    Creates SLURM output directory and backs up the config file if dryrun is False.
+    Also updates slurm_cfg['output'] with the full output path.
+    """
+    if not experiment_cfg:
+        return
+
+    db_path = experiment_cfg["result_database_path"]
+    exp_name = experiment_cfg["experiment_name"]
+    slrm_output_dir_name = experiment_cfg["slrm_output_dir"]
+
+    full_slrm_output_dir = f"{db_path}/{exp_name}/{slrm_output_dir_name}"
+    slurm_cfg["output"] = f"{full_slrm_output_dir}/{exp_name}_%j.out"
+
+    try:
+        Path(full_slrm_output_dir).mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Ensured SLURM output directory exists: {full_slrm_output_dir}")
+    except Exception as e:
+        print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
+
+    if not dryrun_q:
+        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = Path(db_path) / exp_name / datetime_str
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_file, backup_dir / config_file.name)
+            print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
+        except Exception as e:
+            print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
+
+
+def build_common_header(slurm_cfg: dict, exec_cfg: dict, exp_env_block: str) -> str:
+    """Generates the SBATCH headers, environment modules, export variables, and print helper function."""
+    slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_cfg.items())
+
+    modules = exec_cfg.get("modules", [])
+    module_load_block = (
+        "\n# Load Required Environment Modules\n" + "\n".join(f"module load {m}" for m in modules)
+        if modules else "# No environment modules specified"
+    )
+
+    env_vars = exec_cfg.get("env_vars", {})
+    env_var_block = (
+        "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
+        if env_vars else "# No environment variables specified"
+    )
+
     print_args_def = """
 # Function to parse and display command-line arguments to SLURM output
 print_args() {
@@ -291,52 +348,45 @@ print_args() {
     done
 }
 """
-
-    # Extract job array throttling if provided
-    max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
-
-    # Build SLURM header options
-    slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_cfg.items())
-
-    # Environment block setup
-    modules = exec_cfg.get("modules", [])
-    module_load_block = (
-        "\n# Load Required Environment Modules\n" + "\n".join(f"module load {m}" for m in modules)
-        if modules else "# No environment modules specified"
-    )
-
-    env_vars = exec_cfg.get("env_vars", {})
-    env_var_block = (
-        "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
-        if env_vars else "# No environment variables specified"
-    )
-
-    flags_str = " ".join(exec_cfg.get("flags", []))
-
-    # Full execution signature string used for checkpoint hashing
-    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
-    exec_sig_str = " ".join(p for p in exec_sig_components if p)
-
-    # =========================================================================
-    # SINGLE RUN MODE (loopQ == False)
-    # =========================================================================
-    if not loop_q:
-        cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str]
-        exec_cmd = " ".join(p for p in cmd_parts if p)
-
-        script_content = f"""#!/bin/bash
+    return f"""#!/bin/bash
 {slurm_header}
-{experiment_env_block}
+{exp_env_block}
 {module_load_block}
 {env_var_block}
-{print_args_def}
+{print_args_def}"""
+
+
+def build_exec_command(exec_cfg: dict, flags_str: str, fixed_args_str: str, extra_args_str: str) -> str:
+    """
+    Constructs the full execution command string.
+    extra_args_str can be something like "$inner_args_str" or "$outer_args_str $inner_args_str".
+    """
+    cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, extra_args_str]
+    return " ".join(p for p in cmd_parts if p)
+
+
+def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp: str) -> Path:
+    """
+    Writes the script content to a file and prints the location.
+    mode_prefix is one of 'single', 'inner', 'array'.
+    """
+    script_file = Path(f"submit_{mode_prefix}_{exp_name}_{timestamp}.sh")
+    script_file.write_text(script_content)
+    print(f"Generated {mode_prefix}-run SLURM script: {script_file}")
+    return script_file
+
+
+def build_single_mode(ctx: dict) -> str:
+    """Mode 1: Non-looped execution script generator."""
+    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "")
+    return f"""{ctx['common_header']}
 
 # Navigate to executable directory to preserve repo/git context
-cd "{exec_dir}" || exit 1
+cd "{ctx['exec_dir']}" || exit 1
 
 indicator="SINGLE"
 
-EXEC_SIG="{exec_sig_str}"
+EXEC_SIG="{ctx['exec_sig_str']}"
 exec_hash=$(printf '%s' "$EXEC_SIG" | md5sum | cut -d ' ' -f 1)
 
 # Checkpoint check
@@ -348,15 +398,15 @@ fi
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Single Run (loopQ = false)"
-echo "Working Directory: {exec_dir}"
-echo "Exec Path: {exec_path}"
-echo "Flags: {fixed_args_str}"
+echo "Working Directory: {ctx['exec_dir']}"
+echo "Exec Path: {ctx['exec_path']}"
+echo "Flags: {ctx['fixed_args_str']}"
 echo "================================================================"
 
 indicator="SINGLE"
-{exp_args_block}
+{ctx['exp_args_block']}
 
-print_args "$indicator" "{fixed_args_str} $exp_args"
+print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 
 {{
     starttime=$(date +%s%N)
@@ -380,41 +430,30 @@ print_args "$indicator" "{fixed_args_str} $exp_args"
 
 wait
 """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        script_file = Path(f"submit_single_{exp_name}_{timestamp}.sh")
-        script_file.write_text(script_content)
-        print(f"Generated single-run SLURM script: {script_file}")
-        return script_file
 
-    # =========================================================================
-    # INNER LOOP ONLY MODE (loopQ == True, outer_loops empty/omitted)
-    # =========================================================================
-    inner_cfg = cfg["inner_loop"]
-    outer_cfg = cfg.get("outer_loops", [])
 
-    if not outer_cfg:
-        target_inner_file = str(Path(inner_cfg["file_path"]).resolve())
-        # Add fixed_args_str before inner loop arguments
-        cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$inner_args_str"]
-        exec_cmd = " ".join(p for p in cmd_parts if p)
+def build_inner_loop_mode(ctx: dict, inner_cfg: dict) -> str:
+    """Mode 2: Inner-loop-only script generator."""
+    target_inner_file = str(Path(inner_cfg["file_path"]).resolve())
+    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "$inner_args_str")
 
-        script_content = f"""#!/bin/bash
-{slurm_header}
-{experiment_env_block}
-{module_load_block}
-{env_var_block}
-{print_args_def}
+    arg_mapping = "\n".join(
+        f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
+        for idx, arg_name in enumerate(inner_cfg["arg_names"])
+    )
+
+    return f"""{ctx['common_header']}
 
 # Navigate to executable directory to preserve repo/git context
-cd "{exec_dir}" || exit 1
+cd "{ctx['exec_dir']}" || exit 1
 
-EXEC_SIG="{exec_sig_str}"
+EXEC_SIG="{ctx['exec_sig_str']}"
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
-echo "Working Directory: {exec_dir}"
-echo "Exec Path: {exec_path}"
-echo "Fixed Args: {fixed_args_str}"
+echo "Working Directory: {ctx['exec_dir']}"
+echo "Exec Path: {ctx['exec_path']}"
+echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {', '.join(inner_cfg['arg_names'])}"
 echo "================================================================"
@@ -424,14 +463,9 @@ while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
 
-    # Generate an MD5 hash combining line's contents and execution signature
     line_hash=$(printf '%s' "$EXEC_SIG $line" | md5sum | cut -d ' ' -f 1)
-    
     indicator="L${{line_no}}"
-
-    # Append the hash to the indicator
     indicator_checkpoint="L${{line_no}}_${{line_hash}}"
-    
 
     CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
     if [ -f "$CHECKPOINT_FILE" ]; then
@@ -442,13 +476,10 @@ while read -r line || [ -n "$line" ]; do
 
     read -r -a inner_vals <<< "$line"
     inner_args_str=""
-"""
-        for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
-            script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
+{arg_mapping}
+{ctx['exp_args_block']}
 
-        script_content += f"""{exp_args_block}
-
-    print_args "$indicator" "{fixed_args_str} $inner_args_str $exp_args"
+    print_args "$indicator" "{ctx['fixed_args_str']} $inner_args_str $exp_args"
 
     {{
         starttime=$(date +%s%N)
@@ -475,41 +506,106 @@ done < "{target_inner_file}"
 
 wait
 """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        script_file = Path(f"submit_inner_{exp_name}_{timestamp}.sh")
-        script_file.write_text(script_content)
-        print(f"Generated inner-loop SLURM script: {script_file}")
-        return script_file
 
-    # =========================================================================
-    # JOB ARRAY MODE (loopQ == True with outer_loops)
-    # =========================================================================
-    outer_keys = [item["arg_name"] for item in outer_cfg]
-    outer_val_lists = [item["values"] for item in outer_cfg]
-    outer_combinations = list(itertools.product(*outer_val_lists))
+
+def _evaluate_outer_block(block: dict) -> list[dict]:
+    """Helper to evaluate an outer loop block into a list of argument dicts."""
+    block_type = block.get("type", "explicit")
+
+    if block_type == "explicit":
+        arg_name = block["arg_name"]
+        return [{arg_name: val} for val in block["values"]]
+
+    elif block_type == "range":
+        arg_name = block["arg_name"]
+        start = block["start"]
+        stop = block["stop"]
+        step = block.get("step", 1)
+        
+        values = []
+        curr = start
+        if isinstance(step, float) or isinstance(start, float) or isinstance(stop, float):
+            while (step > 0 and curr < stop) or (step < 0 and curr > stop):
+                values.append(round(curr, 10))
+                curr += step
+        else:
+            values = list(range(start, stop, step))
+            
+        return [{arg_name: val} for val in values]
+
+    elif block_type == "tabular_file":
+        file_path = block["file_path"]
+        delimiter = block.get("delimiter")
+        comment_prefix = block.get("comment_prefix", "#")
+        skip_blank = block.get("skip_blank_lines", True)
+        args_spec = block.get("args", [])
+
+        rows = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line_str = line.strip()
+                if skip_blank and not line_str:
+                    continue
+                if comment_prefix and line_str.startswith(comment_prefix):
+                    continue
+
+                if delimiter and delimiter != " ":
+                    cols = [c.strip() for c in line_str.split(delimiter)]
+                else:
+                    cols = line_str.split()
+
+                row_dict = {}
+                for arg in args_spec:
+                    raw_val = cols[arg["column"]]
+                    if "template" in arg:
+                        val = arg["template"].format(val=raw_val)
+                    else:
+                        val = raw_val
+                    row_dict[arg["arg_name"]] = val
+
+                rows.append(row_dict)
+        return rows
+
+    else:
+        raise ValueError(f"Unsupported outer_loop block type: '{block_type}'")
+
+# Outer array with increase flexibility: https://share.gemini.google/pVLNoK7EKGXq
+def build_job_array_mode(ctx: dict, inner_cfg: dict, outer_cfg: list, max_concurrent: int) -> tuple[str, int]:
+    """Mode 3: Outer + Inner loop SLURM Job Array script generator."""
+    # 1. Evaluate each block into a list of argument dictionaries
+    evaluated_blocks = [_evaluate_outer_block(block) for block in outer_cfg]
+
+    # 2. Compute the Cartesian product across all outer loop blocks and merge dictionaries
+    outer_combinations = []
+    for combo_tuple in itertools.product(*evaluated_blocks):
+        merged_combo = {}
+        for d in combo_tuple:
+            merged_combo.update(d)
+        outer_combinations.append(merged_combo)
+
     total_tasks = len(outer_combinations)
 
     array_range = f"0-{total_tasks - 1}"
     if max_concurrent:
         array_range += f"%{max_concurrent}"
 
-    array_header = f"#SBATCH --array={array_range}\n"
+    # Inject array SBATCH directive after #!/bin/bash
+    lines = ctx['common_header'].splitlines()
+    lines.insert(1, f"#SBATCH --array={array_range}")
+    header_with_array = "\n".join(lines)
 
-    bash_outer_args = []
-    bash_outer_descs = []
-    bash_target_files = []
+    bash_outer_args, bash_outer_descs, bash_target_files = [], [], []
 
-    for combo in outer_combinations:
-        combo_dict = dict(zip(outer_keys, combo))
+    for combo_dict in outer_combinations:
         outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
         outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
-        
+
         target_inner_file = inner_cfg.get("file_path")
         if target_inner_file:
             target_inner_file = str(Path(target_inner_file).resolve())
-        elif outer_cfg:
+        else:
             for loop_cfg in outer_cfg:
-                arg_name = loop_cfg["arg_name"]
+                arg_name = loop_cfg.get("arg_name")
                 val = combo_dict.get(arg_name)
                 if "inner_files" in loop_cfg and val in loop_cfg["inner_files"]:
                     target_inner_file = loop_cfg["inner_files"][val]
@@ -523,22 +619,19 @@ wait
     descs_array_block = "\n".join(bash_outer_descs)
     files_array_block = "\n".join(bash_target_files)
 
-    #exec_cmd = f"{exec_cfg['language']} {flags_str} {exec_cfg['executable']} $outer_args_str $inner_args_str".strip()
-    # Add fixed_args_str before outer and inner loop arguments
-    cmd_parts = [exec_cfg['language'], flags_str, exec_cfg['executable'], fixed_args_str, "$outer_args_str $inner_args_str"]
-    exec_cmd = " ".join(p for p in cmd_parts if p)
+    exec_cmd = build_exec_command(ctx['exec_cfg'], ctx['flags_str'], ctx['fixed_args_str'], "$outer_args_str $inner_args_str")
 
-    script_content = f"""#!/bin/bash
-{slurm_header}{array_header}
-{experiment_env_block}
-{module_load_block}
-{env_var_block}
-{print_args_def}
+    arg_mapping = "\n".join(
+        f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
+        for idx, arg_name in enumerate(inner_cfg["arg_names"])
+    )
+
+    script_content = f"""{header_with_array}
 
 # Navigate to executable directory to preserve repo/git context
-cd "{exec_dir}" || exit 1
+cd "{ctx['exec_dir']}" || exit 1
 
-EXEC_SIG="{exec_sig_str}"
+EXEC_SIG="{ctx['exec_sig_str']}"
 
 # Parameter mapping arrays built by orchestrator.py
 OUTER_ARGS=(
@@ -562,9 +655,9 @@ target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
 
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
-echo "Working Directory: {exec_dir}"
-echo "Exec Path: {exec_path}"
-echo "Fixed Args: {fixed_args_str}"
+echo "Working Directory: {ctx['exec_dir']}"
+echo "Exec Path: {ctx['exec_path']}"
+echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
 echo "Inner Loop Source File: $target_inner_file"
@@ -576,28 +669,23 @@ while read -r line || [ -n "$line" ]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     ((line_no++))
 
-    # Generate an MD5 hash of the inner line, outer arguments AND the execution signature
     combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $line" | md5sum | cut -d ' ' -f 1)
-    
     indicator="A${{TASK_ID}}_L${{line_no}}"
-
     indicator_checkpoint="A${{TASK_ID}}_L${{line_no}}_${{combo_hash}}"
 
     CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
     if [ -f "$CHECKPOINT_FILE" ]; then
         echo "[CHECKPOINT] Skipping $indicator - already completed."
+        echo "[CHECKPOINT] Hash: ${{combo_hash}}"
         continue
     fi
 
     read -r -a inner_vals <<< "$line"
     inner_args_str=""
-"""
-    for c_idx, arg_name in enumerate(inner_cfg["arg_names"]):
-        script_content += f'    inner_args_str+=" --{arg_name} ${{inner_vals[{c_idx}]}}"\n'
+{arg_mapping}
+{ctx['exp_args_block']}
 
-    script_content += f"""{exp_args_block}
-
-    print_args "$indicator" "{fixed_args_str} $outer_args_str $inner_args_str $exp_args"
+    print_args "$indicator" "{ctx['fixed_args_str']} $outer_args_str $inner_args_str $exp_args"
 
     {{
         starttime=$(date +%s%N)
@@ -623,12 +711,66 @@ done < "$target_inner_file"
 
 wait
 """
+    return script_content, total_tasks
+
+
+def generate_slurm_script(config_path, dryrunQ):
+    cfg = get_dict_from_config_file(config_path)
+    config_file = Path(config_path)
+
+    validate_config(cfg, config_path)
+    print(f"[SUCCESS] Config validation passed for '{config_path}'.")
+
+    loop_q = determine_loop_q(cfg)
+    exec_cfg = cfg["execution"]
+    slurm_cfg = cfg["slurm"].copy()
+    experiment_cfg = cfg.get("experiment")
+    max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
+
+    # 1. Filesystem setup (directories + config backup)
+    setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, dryrunQ)
+
+    # 2. Build experiment strings (no I/O)
+    exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg)
+
+    # 3. Build common header
+    common_header = build_common_header(slurm_cfg, exec_cfg, exp_env_block)
+
+    exec_path = Path(exec_cfg["executable"]).resolve()
+    exec_dir = exec_path.parent
+    fixed_args_str = format_cli_args(cfg.get("args", {}))
+    flags_str = " ".join(exec_cfg.get("flags", []))
+    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
+    exec_sig_str = " ".join(p for p in exec_sig_components if p)
+
+    ctx = {
+        "exec_cfg": exec_cfg,
+        "exec_path": exec_path,
+        "exec_dir": exec_dir,
+        "flags_str": flags_str,
+        "fixed_args_str": fixed_args_str,
+        "exec_sig_str": exec_sig_str,
+        "exp_args_block": exp_args_block,
+        "common_header": common_header,
+    }
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    script_file = Path(f"submit_array_{exp_name}_{timestamp}.sh")
-    script_file.write_text(script_content)
-    print(f"Generated SLURM Job Array script ({total_tasks} tasks): {script_file}")
 
+    # Mode selection and generation
+    if not loop_q:
+        script_content = build_single_mode(ctx)
+        return write_script(script_content, "single", exp_name, timestamp)
+
+    inner_cfg = cfg["inner_loop"]
+    outer_cfg = cfg.get("outer_loops", [])
+
+    if not outer_cfg:
+        script_content = build_inner_loop_mode(ctx, inner_cfg)
+        return write_script(script_content, "inner", exp_name, timestamp)
+
+    script_content, total_tasks = build_job_array_mode(ctx, inner_cfg, outer_cfg, max_concurrent)
+    script_file = write_script(script_content, "array", exp_name, timestamp)
+    print(f"({total_tasks} tasks)")
     return script_file
 
 def extract_config_flags(cfg: dict) -> tuple[set[str], set[str]]:
