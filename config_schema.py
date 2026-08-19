@@ -64,8 +64,10 @@ class TabularOuterLoop(BaseModel):
 
     @field_validator("file_path")
     @classmethod
-    def check_file_exists(cls, v: Path) -> Path:
-        if not v.is_file():
+    def check_file_exists(cls, v: Path, info: ValidationInfo) -> Path:
+        # Reads 'check_files' from context, defaulting to True if not provided
+        check_files = info.context.get("check_files", True) if info.context else True        
+        if check_files and not v.is_file():
             raise ValueError(f"Tabular file does not exist: '{v}'")
         return v
 
@@ -184,10 +186,10 @@ class AppConfig(BaseModel):
 
 # --- 4. Replacement Validation Entrypoint ---
 
-def validate_config(cfg: dict, config_path: str) -> AppConfig:
+def validate_config(cfg: dict, config_path: str, dryrunQ: bool) -> AppConfig:
     """Validates structure, types, and file existence using Pydantic."""
     try:
-        validated_cfg = AppConfig.model_validate(cfg, context={"check_files": False})
+        validated_cfg = AppConfig.model_validate(cfg, context={"check_files": not dryrunQ})
         return validated_cfg
     except ValidationError as e:
         print(f"\n[CONFIG ERROR] Validation failed for '{config_path}':", file=sys.stderr)
