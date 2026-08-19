@@ -9,10 +9,10 @@ import subprocess
 import re
 import os
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Set, Tuple
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, determine_loop_q, ExperimentConfig, SlurmConfig, ExecutionConfig
+from config_schema import validate_config, AppConfig, determine_loop_q, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularOuterLoop
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -269,73 +269,58 @@ def generate_slurm_script(config_path, dryrunQ):
         print(f"({total_tasks} tasks)")
         return script_file
 
-def extract_config_flags(cfg: dict) -> tuple[set[str], set[str]]:
-    """Collects all argument keys across all configuration sections and converts them to CLI flags.
-    CAUTION: Code assumes single letter args also use the "--<arg>" convention.
+def extract_config_flags(config: AppConfig) -> Tuple[Set[str], Set[str]]:
+    """Collects all argument keys across all configuration sections in AppConfig
+    and converts them to CLI flags.
     """
-    raw_keys = set()
+    raw_keys: Set[str] = set()
 
     # 1. Static arguments
-    if isinstance(cfg.get("args"), dict):
-        raw_keys.update(cfg["args"].keys())
+    if config.args:
+        raw_keys.update(config.args.keys())
 
     # 2. Inner loop argument names
-    inner_cfg = cfg.get("inner_loop", {})
-    if isinstance(inner_cfg, dict) and isinstance(
-        inner_cfg.get("arg_names"), list
-    ):
-        raw_keys.update(inner_cfg["arg_names"])
+    if config.inner_loop:
+        raw_keys.update(config.inner_loop.arg_names)
 
     # 3. Outer loop argument names
-    outer_cfg = cfg.get("outer_loops", [])
-    if isinstance(outer_cfg, list):
-        for o_loop in outer_cfg:
-            if isinstance(o_loop, dict):
-                if isinstance(o_loop.get("arg_names"), list):
-                    raw_keys.update(o_loop["arg_names"])
-                elif isinstance(o_loop.get("arg_name"), str):
-                    raw_keys.add(o_loop["arg_name"])
+    for block in config.outer_loops:
+        if isinstance(block, TabularOuterLoop):
+            for arg_spec in block.args:
+                raw_keys.add(arg_spec.arg_name)
+        elif hasattr(block, "arg_name") and getattr(block, "arg_name"):
+            raw_keys.add(getattr(block, "arg_name"))
+        elif hasattr(block, "arg_names") and getattr(block, "arg_names"):
+            raw_keys.update(getattr(block, "arg_names"))
 
     # 4. Experiment tracking arguments
-    exp_cfg = cfg.get("experiment", {})
-    if isinstance(exp_cfg, dict) and isinstance(
-        exp_cfg.get("tracking_args"), dict
-    ):
-        raw_keys.update(exp_cfg["tracking_args"].keys())
+    if config.experiment and config.experiment.tracking_args:
+        raw_keys.update(config.experiment.tracking_args.keys())
 
-    # Convert keys into CLI flag formats (e.g., "lr" -> "--lr", "v" -> "-v")
-    formatted_flags = set()
+    # Convert keys into CLI flag formats (e.g., "lr" -> "--lr")
+    formatted_flags: Set[str] = set()
     for key in raw_keys:
         key_str = str(key).strip()
-        if not key_str.startswith("-"):
-            #flag = f"-{key_str}" if len(key_str) == 1 else f"--{key_str}"
-            flag = f"--{key_str}"
-        else:
-            flag = key_str
+        flag = key_str if key_str.startswith("-") else f"--{key_str}"
         formatted_flags.add(flag)
 
     return formatted_flags, raw_keys
 
-def validate_script_args(config_path) -> tuple[bool, list[str]]:
-    """Validates if arguments defined in the config dictionary are supported by the target executable via --help.
+
+def validate_script_args(config: AppConfig) -> Tuple[bool, List[str]]:
+    """Validates if arguments defined in the AppConfig instance are supported
+    by the target executable via --help.
 
     Returns:
-        tuple[bool, list[str]]: (is_valid, list_of_unsupported_flags)
+        Tuple[bool, List[str]]: (is_valid, list_of_unsupported_flags)
     """
-    cfg = get_dict_from_config_file(config_path)
-    
-    exec_cfg = cfg.get("execution", {})
-    interpreter = exec_cfg.get("language", "")
-    executable_path = exec_cfg.get("executable", "")
-    modules = exec_cfg.get("modules", [])
-
-    if not interpreter or not executable_path:
-        raise ValueError(
-            "Missing required 'execution.language' or 'execution.executable' in config."
-        )
+    exec_cfg = config.execution
+    interpreter = exec_cfg.language
+    executable_path = str(exec_cfg.executable)
+    modules = exec_cfg.modules
 
     # Collect flags planned across all modes
-    flags_to_check, _ = extract_config_flags(cfg)
+    flags_to_check, _ = extract_config_flags(config)
     if not flags_to_check:
         return True, []
 
@@ -362,7 +347,7 @@ def validate_script_args(config_path) -> tuple[bool, list[str]]:
     # Extract all supported option flags from --help text
     raw_found_flags = set(re.findall(r"(?<!\w)(-[a-zA-Z0-9_|-]+)", help_output))
 
-    supported_flags = set()
+    supported_flags: Set[str] = set()
     for flag_group in raw_found_flags:
         for flag in re.split(r"[,|/]", flag_group):
             clean_flag = flag.strip()
@@ -379,21 +364,26 @@ def validate_script_args(config_path) -> tuple[bool, list[str]]:
 
     return len(unsupported) == 0, unsupported
 
-def submit_slurm_script(script_path: Path, config_path, checkargsQ):
+def submit_slurm_script(
+    script_path: Path,
+    config: AppConfig,
+    checkargs_q: bool
+) -> None:
     """Submits the generated script to SLURM."""
 
-    if checkargsQ:
-        print(f"\n[INFO] Validating arguments passed to executable...")
-        print(f"[INFO] This may take some time. Use --noargcheck to disable argument checking.")
-        print(f"[INFO] CAUTION: Validation function expects all args in \"--<args>\" format!")
-        print(f"[INFO] This includes single letter args!")
-        validation_result, failed_args = validate_script_args(config_path)
+    if checkargs_q:
+        print("\n[INFO] Validating arguments passed to executable...")
+        print("[INFO] This may take some time. Use --noargcheck to disable argument checking.")
+        print('[INFO] CAUTION: Validation function expects all args in "--<args>" format!')
+        print("[INFO] This includes single letter args!")
+        
+        validation_result, failed_args = validate_script_args(config)
         if not validation_result:
-            print(f"\n[ERROR] Argument validation failed!")
-            print(f"[ERROR] Offending args: ", " ".join(failed_args))
+            print("\n[ERROR] Argument validation failed!", file=sys.stderr)
+            print(f"[ERROR] Offending args: {' '.join(failed_args)}", file=sys.stderr)
             sys.exit(1)
         else:
-            print(f"\n[SUCCESS] Argument validation succeeded!")
+            print("\n[SUCCESS] Argument validation succeeded!")
     
     print(f"\n[INFO] Submitting {script_path} to SLURM...")
     try:
@@ -604,7 +594,7 @@ def collect_slurm_results_to_db(config_path: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate and submit SLURM scripts from a JSON config.")
     parser.add_argument(
-        "config",
+        "config_path",
         nargs="?",
         default="config.json",
         help="Path to the JSON configuration file (default: config.json)"
@@ -638,16 +628,18 @@ if __name__ == "__main__":
     #exit()
 
     if args.collect:
-        collect_slurm_results_to_db(args.config)
+        collect_slurm_results_to_db(args.config_path)
         exit()
 
     checkargsQ = not args.noargcheck
     
-    generated_script = generate_slurm_script(args.config, args.dryrun)
+    generated_script = generate_slurm_script(args.config_path, args.dryrun)
 
     if args.dryrun:
         print(f"\n[INFO] Dry-run: not submitting to SLURM.")
     elif args.submit:
-        submit_slurm_script(generated_script, args.config, checkargsQ)
+        cfg = get_dict_from_config_file(args.config_path)
+        config: AppConfig = validate_config(cfg, args.config_path, args.dryrun)
+        submit_slurm_script(generated_script, config, checkargsQ)
     else:
         print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
