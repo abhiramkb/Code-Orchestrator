@@ -10,6 +10,9 @@ import re
 import os
 import sqlite3
 
+# Required for Pydantic based validation of input config file
+from config_schema import validate_config, AppConfig, determine_loop_q
+
 def get_dict_from_config_file(config_path) -> dict:
     config_file = Path(config_path)
     if not config_file.is_file():
@@ -24,182 +27,6 @@ def get_dict_from_config_file(config_path) -> dict:
             sys.exit(1)
     return cfg
 
-def determine_loop_q(cfg: dict) -> bool:
-    """Determines if loop mode is active based on config flags and structure."""
-
-    mode_index = 0 # 0 -> no loops, 1 -> inner loop only, 2 -> inner and outer loops
-    
-    if "loopQ" in cfg:
-        mode_index = 1
-        if "outer_loops" in cfg:
-            mode_index = 2
-        return True, mode_index
-    
-    # If loopQ is missing, check if loop options are absent while args is present
-    has_inner = "inner_loop" in cfg
-    has_outer = "outer_loops" in cfg
-    has_args = "args" in cfg
-    has_slurm = "slurm" in cfg
-    has_execution = "execution" in cfg
-
-    if not has_inner and not has_outer and has_args and has_slurm and has_execution:
-        return False, mode_index
-
-    if has_inner:
-        mode_index = 1
-        if has_outer:
-            mode_index = 2
-
-    return True, mode_index
-
-
-def validate_config(cfg: dict, config_path: str):
-    """Validates structure, data types, and file existence for the configuration dictionary."""
-    errors = []
-
-    # 1. Validate top-level keys
-    (loop_q, mode_index) = determine_loop_q(cfg)
-    
-    if "args" in cfg and not isinstance(cfg["args"], dict):
-        errors.append("'args' must be an object (key-value pairs).")
-
-    if "execution" not in cfg or not isinstance(cfg["execution"], dict):
-        errors.append("Missing or invalid 'execution' section (must be an object).")
-    else:
-        exec_cfg = cfg["execution"]
-        if "language" not in exec_cfg or not isinstance(exec_cfg["language"], str):
-            errors.append("Missing or invalid 'execution.language' (must be a string).")
-        if "executable" not in exec_cfg or not isinstance(exec_cfg["executable"], str):
-            errors.append("Missing or invalid 'execution.executable' (must be a string).")
-        if "flags" in exec_cfg and not isinstance(exec_cfg["flags"], list):
-            errors.append("'execution.flags' must be an array of strings.")
-        if "modules" in exec_cfg and not isinstance(exec_cfg["modules"], list):
-            errors.append("'execution.modules' must be an array of strings.")
-        if "env_vars" in exec_cfg and not isinstance(exec_cfg["env_vars"], dict):
-            errors.append("'execution.env_vars' must be an object (key-value pairs).")
-
-    if "slurm" not in cfg or not isinstance(cfg["slurm"], dict):
-        errors.append("Missing or invalid 'slurm' section (must be an object).")
-
-    # 2. Mode-Specific Validation
-    if not loop_q:
-        # Single Run Mode
-        if "args" in cfg and not isinstance(cfg["args"], dict):
-            errors.append("'args' must be an object when 'loopQ' is false.")
-    else:
-        # Loop / Parameter Scan Mode
-        if "inner_loop" not in cfg or not isinstance(cfg["inner_loop"], dict):
-            errors.append("Missing or invalid 'inner_loop' section (required when loopQ=true).")
-        else:
-            inner_cfg = cfg["inner_loop"]
-            if "arg_names" not in inner_cfg or not isinstance(inner_cfg["arg_names"], list):
-                errors.append("Missing or invalid 'inner_loop.arg_names' (must be an array).")
-
-        outer_cfg = cfg.get("outer_loops", [])
-        if not isinstance(outer_cfg, list):
-            errors.append("'outer_loops' must be an array.")
-        else:
-            # Polymorphic Outer Loop Block Validation
-            for idx, o_loop in enumerate(outer_cfg):
-                if not isinstance(o_loop, dict):
-                    errors.append(f"'outer_loops[{idx}]' must be an object.")
-                    continue
-                
-                block_type = o_loop.get("type", "explicit")
-                
-                if block_type == "explicit":
-                    if "arg_name" not in o_loop or not isinstance(o_loop["arg_name"], str):
-                        errors.append(f"'outer_loops[{idx}]' (explicit) missing or invalid 'arg_name'.")
-                    if "values" not in o_loop or not isinstance(o_loop["values"], list):
-                        errors.append(f"'outer_loops[{idx}]' (explicit) missing or invalid 'values' array.")
-                
-                elif block_type == "range":
-                    if "arg_name" not in o_loop or not isinstance(o_loop["arg_name"], str):
-                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'arg_name'.")
-                    if "start" not in o_loop or not isinstance(o_loop["start"], (int, float)):
-                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'start' (must be a number).")
-                    if "stop" not in o_loop or not isinstance(o_loop["stop"], (int, float)):
-                        errors.append(f"'outer_loops[{idx}]' (range) missing or invalid 'stop' (must be a number).")
-                    if "step" in o_loop and not isinstance(o_loop["step"], (int, float)):
-                        errors.append(f"'outer_loops[{idx}]' (range) invalid 'step' (must be a number).")
-                
-                elif block_type == "tabular_file":
-                    if "file_path" not in o_loop or not isinstance(o_loop["file_path"], str):
-                        errors.append(f"'outer_loops[{idx}]' (tabular_file) missing or invalid 'file_path'.")
-                    else:
-                        tf_path = Path(o_loop["file_path"])
-                        #if not tf_path.is_file():
-                        #    errors.append(f"'outer_loops[{idx}]' tabular file does not exist: '{o_loop['file_path']}'")
-                    
-                    if "args" not in o_loop or not isinstance(o_loop["args"], list):
-                        errors.append(f"'outer_loops[{idx}]' (tabular_file) missing or invalid 'args' array.")
-                    else:
-                        for arg_idx, arg_spec in enumerate(o_loop["args"]):
-                            if not isinstance(arg_spec, dict):
-                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' must be an object.")
-                                continue
-                            if "arg_name" not in arg_spec or not isinstance(arg_spec["arg_name"], str):
-                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' missing or invalid 'arg_name'.")
-                            if "column" not in arg_spec or not isinstance(arg_spec["column"], int):
-                                errors.append(f"'outer_loops[{idx}].args[{arg_idx}]' missing or invalid 'column' (must be an integer).")
-                else:
-                    errors.append(f"'outer_loops[{idx}]' has unknown type: '{block_type}'. Expected 'explicit', 'range', or 'tabular_file'.")
-
-        # 3. Inner Loop Data File Verification
-        if "inner_loop" in cfg and isinstance(cfg["inner_loop"], dict):
-            inner_cfg = cfg["inner_loop"]
-            target_inner_file = inner_cfg.get("file_path")
-
-            if target_inner_file:
-                p = Path(target_inner_file)
-                #if not p.is_file():
-                #    errors.append(f"Specified 'inner_loop.file_path' does not exist: '{target_inner_file}'")
-            elif outer_cfg:
-                file_mapped = False
-                for idx, o_loop in enumerate(outer_cfg):
-                    if isinstance(o_loop, dict) and "inner_files" in o_loop:
-                        file_mapped = True
-                        inner_files_map = o_loop["inner_files"]
-                        if not isinstance(inner_files_map, dict):
-                            errors.append(f"'outer_loops[{idx}].inner_files' must be an object.")
-                            continue
-                if not file_mapped:
-                    errors.append("No 'file_path' provided in 'inner_loop' and no 'inner_files' mappings found in 'outer_loops'.")
-            else:
-                errors.append("No 'file_path' specified in 'inner_loop' and no 'outer_loops' defined.")
-
-    # 4. Experiment Tracking Validation
-    if "experiment" in cfg:
-        exp_cfg = cfg["experiment"]
-        if not isinstance(exp_cfg, dict):
-            errors.append("'experiment' section must be an object.")
-        else:
-            for req_key in ["result_database_path", "experiment_name", "slrm_output_dir"]:
-                if req_key not in exp_cfg or not isinstance(exp_cfg[req_key], str):
-                    errors.append(f"Missing or invalid 'experiment.{req_key}' (must be a string).")
-            # Check for tracking_args dictionary
-            if "tracking_args" not in exp_cfg or exp_cfg["tracking_args"] is None:
-                print(
-                    "[WARNING] 'tracking_args' is missing under 'experiment' in configuration.\n"
-                    "          'exp_args' will default to an empty string.\n"
-                    "          Example structure to enable dynamic tracking flags:\n"
-                    "          \"experiment\": {\n"
-                    "              \"tracking_args\": {\n"
-                    "                  \"save_dir\": \"{save_dir}/{experiment_name}_{__indicator}\",\n"
-                    "                  \"json\": \"{save_dir}/{experiment_name}_{__indicator}/result.json\"\n"
-                    "              }\n"
-                    "          }\n",
-                    file=sys.stderr
-                )
-            elif not isinstance(exp_cfg["tracking_args"], dict):
-                errors.append("'experiment.tracking_args' must be an object (key-value pairs).")
-
-    if errors:
-        print(f"\n[CONFIG ERROR] Validation failed for '{config_path}':", file=sys.stderr)
-        for err in errors:
-            print(f"  - {err}", file=sys.stderr)
-        sys.exit(1)
-    return mode_index
 
 
 def format_cli_args(args_dict: dict) -> str:
@@ -718,7 +545,7 @@ def generate_slurm_script(config_path, dryrunQ):
     cfg = get_dict_from_config_file(config_path)
     config_file = Path(config_path)
 
-    validate_config(cfg, config_path)
+    validated_cfg = validate_config(cfg, config_path)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
     loop_q = determine_loop_q(cfg)

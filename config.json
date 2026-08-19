@@ -34,17 +34,18 @@
     }
   },
   "inner_loop": {
-    "file_path": null,
+    "file_path": "kinematic_points.txt",
     "delimiter": " ",
     "arg_names": ["x", "Q2"]
   },
   "outer_loops": [
     {
+      "type": "explicit",
       "arg_name": "dipole_fit",
-      "values": ["fit_gbw.dat", "fit_mv.dat"],
-      "inner_files": {"fit_gbw.dat":"kinematics_gbw.txt","fit_mv.dat":"kinematics_mv.txt"}
+      "values": ["fit_gbw.dat", "fit_mv.dat"]
     },
     {
+      "type": "explicit",
       "arg_name": "scale",
       "values": [0.5, 1.0, 2.0]
     }
