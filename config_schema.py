@@ -9,8 +9,8 @@ def determine_loop_q(cfg: dict) -> bool:
 
     if "loopQ" in cfg:
         mode_index = 1
-    if "outer_loops" in cfg:
-        mode_index = 2
+        if "outer_loops" in cfg:
+            mode_index = 2
         return True, mode_index
 
     # If loopQ is missing, check if loop options are absent while args is present
@@ -26,10 +26,11 @@ def determine_loop_q(cfg: dict) -> bool:
 
     if has_inner:
         mode_index = 1
-
     if has_outer:
         mode_index = 2
-        return True, mode_index
+
+    return True, mode_index
+        
 
 
 # --- 1. Outer Loop Polymorphic Models ---
@@ -95,6 +96,9 @@ class SlurmConfig(BaseModel):
     nodes: int
     time: str
     output: str
+    max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
+
+    model_config = {"extra": "allow", "populate_by_name": True}
 
 
 class InnerLoopConfig(BaseModel):

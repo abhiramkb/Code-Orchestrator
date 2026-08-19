@@ -9,9 +9,10 @@ import subprocess
 import re
 import os
 import sqlite3
+from typing import Any, Dict, Optional
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, determine_loop_q
+from config_schema import validate_config, AppConfig, determine_loop_q, ExperimentConfig, SlurmConfig, ExecutionConfig
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -32,7 +33,7 @@ def get_dict_from_config_file(config_path) -> dict:
 
 
 
-def format_cli_args(args_dict: dict) -> str:
+def format_cli_args(args_dict: Dict[str, Any]) -> str:
     """Formats key-value argument pairs into standard CLI flag strings."""
     args_list = []
     for k, v in args_dict.items():
@@ -42,6 +43,61 @@ def format_cli_args(args_dict: dict) -> str:
             args_list.append(f'--{k} {v}')
     return " ".join(args_list)
 
+def build_experiment_strings_pd(experiment: Optional[ExperimentConfig]) -> tuple[str, str, str]:
+    """
+    Builds the environment block and argument block for experiment tracking.
+    Returns (exp_name, exp_env_block, exp_args_block).
+    """
+    if experiment is None:
+        exp_env_block = """
+export CHECKPOINT_DIR="./checkpoints"
+mkdir -p "$CHECKPOINT_DIR"
+"""
+        exp_args_block = '\n    exp_args=""'
+        return "noexp", exp_env_block, exp_args_block
+
+    db_path = experiment.result_database_path
+    exp_name = experiment.experiment_name
+    slrm_output_dir_name = experiment.slrm_output_dir
+
+    exp_env_block = f"""
+# =========================================================================
+# EXPERIMENT TRACKING
+# =========================================================================
+export RESULT_DATABASE_PATH="{db_path}"
+export EXPERIMENT_NAME="{exp_name}"
+export SLRM_OUTPUT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/{slrm_output_dir_name}"
+
+# Safe directory creation for the specific job
+export JOB_ID=${{SLURM_JOB_ID:-$$}}
+export SAVE_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/$JOB_ID"
+export CHECKPOINT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/checkpoints"
+
+mkdir -p "$SAVE_DIR"
+mkdir -p "$CHECKPOINT_DIR"
+"""
+
+    tracking_args = experiment.tracking_args
+    arg_components = []
+    if tracking_args is not None:
+        for key, val_template in tracking_args.items():
+            formatted_val = (
+                val_template
+                .replace("{result_database_path}", "${RESULT_DATABASE_PATH}")
+                .replace("{experiment_name}", "${EXPERIMENT_NAME}")
+                .replace("{slrm_output_dir}", "${SLRM_OUTPUT_DIR}")
+                .replace("{save_dir}", "${SAVE_DIR}")
+                .replace("{__indicator}", "${indicator}")
+            )
+            arg_components.append(f'--{key} \\"{formatted_val}\\"')
+    tracking_args_str = " ".join(arg_components)
+
+    exp_args_block = f"""
+    exp_args=""
+    if [ -n "${{SAVE_DIR:-}}" ]; then
+        exp_args="{tracking_args_str}"
+    fi"""
+    return exp_name, exp_env_block, exp_args_block
 
 def build_experiment_strings(experiment_cfg: dict) -> tuple[str, str, str]:
     """
@@ -100,6 +156,42 @@ mkdir -p "$CHECKPOINT_DIR"
     fi"""
     return exp_name, exp_env_block, exp_args_block
 
+def setup_experiment_directories_pd(
+    experiment: Optional[ExperimentConfig],
+    slurm: SlurmConfig,
+    config_file: Path,
+    dryrun_q: bool
+) -> None:
+    """
+    Creates SLURM output directory and backs up the config file if dryrun is False.
+    Updates slurm.output directly on the SlurmConfig model.
+    """
+    if experiment is None:
+        return
+
+    db_path = experiment.result_database_path
+    exp_name = experiment.experiment_name
+    slrm_output_dir_name = experiment.slrm_output_dir
+
+    full_slrm_output_dir = f"{db_path}/{exp_name}/{slrm_output_dir_name}"
+    # Mutates the Pydantic model directly
+    slurm.output = f"{full_slrm_output_dir}/{exp_name}_%j.out"
+
+    try:
+        Path(full_slrm_output_dir).mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Ensured SLURM output directory exists: {full_slrm_output_dir}")
+    except Exception as e:
+        print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
+
+    if not dryrun_q:
+        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = Path(db_path) / exp_name / datetime_str
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(config_file, backup_dir / config_file.name)
+            print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
+        except Exception as e:
+            print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
 
 def setup_experiment_directories(experiment_cfg: dict, slurm_cfg: dict, config_file: Path, dryrun_q: bool):
     """
@@ -132,6 +224,63 @@ def setup_experiment_directories(experiment_cfg: dict, slurm_cfg: dict, config_f
         except Exception as e:
             print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
 
+def build_common_header_pd(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_block: str) -> str:
+    """Generates the SBATCH headers, environment modules, export variables, and print helper function."""
+    # Dump SlurmConfig using aliases (e.g. 'job-name') and excluding None values
+    slurm_dict = slurm.model_dump(by_alias=True, exclude_none=True)
+    
+    # Exclude internal configuration fields not meant for SBATCH
+    slurm_dict.pop("max_concurrent_tasks", None)
+
+    slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_dict.items())
+
+    modules = exec_cfg.modules
+    module_load_block = (
+        "\n# Load Required Environment Modules\n" + "\n".join(f"module load {m}" for m in modules)
+        if modules else "# No environment modules specified"
+    )
+
+    env_vars = exec_cfg.env_vars
+    env_var_block = (
+        "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
+        if env_vars else "# No environment variables specified"
+    )
+
+    print_args_def = """
+# Function to parse and display command-line arguments to SLURM output
+print_args() {
+    local ind="$1"
+    shift
+    local args_str="$*"
+    if [ -z "$args_str" ]; then
+        return
+    fi
+    eval "set -- $args_str"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --*)
+                local param_name="${1#--}"
+                if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
+                    echo "[${ind}_args] ${param_name}: $2"
+                    shift 2
+                else
+                    echo "[${ind}_args] ${param_name}: "
+                    shift 1
+                fi
+                ;;
+            *)
+                shift 1
+                ;;
+        esac
+    done
+}
+"""
+    return f"""#!/bin/bash
+{slurm_header}
+{exp_env_block}
+{module_load_block}
+{env_var_block}
+{print_args_def}"""
 
 def build_common_header(slurm_cfg: dict, exec_cfg: dict, exp_env_block: str) -> str:
     """Generates the SBATCH headers, environment modules, export variables, and print helper function."""
@@ -202,29 +351,41 @@ def generate_slurm_script(config_path, dryrunQ):
     cfg = get_dict_from_config_file(config_path)
     config_file = Path(config_path)
 
-    validated_cfg = validate_config(cfg, config_path, dryrunQ)
+    # 1. Validate & convert raw dict to typed AppConfig object
+    config: AppConfig = validate_config(cfg, config_path, dryrunQ)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
+    # 2. Extract execution metadata cleanly via dot-notation
     loop_q = determine_loop_q(cfg)
     exec_cfg = cfg["execution"]
     slurm_cfg = cfg["slurm"].copy()
     experiment_cfg = cfg.get("experiment")
-    max_concurrent = slurm_cfg.pop("max_concurrent_tasks", None)
+
+    exec_cfg_pd = config.execution
+    slurm_cfg_pd = config.slurm
+    experiment_cfg_pd = config.experiment
+
+    print("loop_q:", loop_q)
+    print("config.mode_index:", config.mode_index)
+
+    print("exec_cfg:", exec_cfg)
+    print("exec_cfg_pydantic:", config.execution)
+    
 
     # 1. Filesystem setup (directories + config backup)
-    setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, dryrunQ)
+    setup_experiment_directories_pd(experiment_cfg_pd, slurm_cfg_pd, config_file, dryrunQ)
 
     # 2. Build experiment strings (no I/O)
-    exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg)
+    exp_name, exp_env_block, exp_args_block = build_experiment_strings_pd(experiment_cfg_pd)
 
     # 3. Build common header
-    common_header = build_common_header(slurm_cfg, exec_cfg, exp_env_block)
+    common_header = build_common_header_pd(slurm_cfg_pd, exec_cfg_pd, exp_env_block)
 
-    exec_path = Path(exec_cfg["executable"]).resolve()
+    exec_path = Path(exec_cfg_pd.executable).resolve()
     exec_dir = exec_path.parent
-    fixed_args_str = format_cli_args(cfg.get("args", {}))
-    flags_str = " ".join(exec_cfg.get("flags", []))
-    exec_sig_components = [exec_cfg['language'], flags_str, str(exec_path), fixed_args_str]
+    fixed_args_str = format_cli_args(config.args)
+    flags_str = " ".join(exec_cfg_pd.flags)
+    exec_sig_components = [exec_cfg_pd.language, flags_str, str(exec_path), fixed_args_str]
     exec_sig_str = " ".join(p for p in exec_sig_components if p)
 
     ctx = {
