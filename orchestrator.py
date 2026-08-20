@@ -12,7 +12,7 @@ import sqlite3
 from typing import Any, Dict, Optional, List, Set, Tuple
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, determine_loop_q, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularOuterLoop
+from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularOuterLoop
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -243,7 +243,6 @@ def generate_slurm_script(config_path, dryrunQ):
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
 
     # 2. Extract execution metadata cleanly via dot-notation
-    loop_q = determine_loop_q(cfg)
     exec_cfg = config.execution
     slurm_cfg = config.slurm
     experiment_cfg = config.experiment
