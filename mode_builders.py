@@ -3,6 +3,7 @@ import itertools
 from typing import Any, Dict, List, Optional, Tuple
 
 from config_schema import (
+    AppConfig,
     ExecutionConfig,
     ExplicitOuterLoop,
     InnerLoopConfig,
@@ -19,7 +20,7 @@ def build_exec_command(
 ) -> str:
     """Constructs the full execution command string using ExecutionConfig model attributes."""
     cmd_parts = [
-        exec_cfg.language,
+        exec_cfg.interpreter,
         flags_str,
         str(exec_cfg.executable),
         fixed_args_str,
@@ -95,6 +96,8 @@ def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
         raise ValueError("InnerLoopConfig.file_path cannot be None for Inner Loop Mode.")
 
     target_inner_file = str(inner_cfg.file_path.resolve())
+
+    comment_prefix = inner_cfg.comment_prefix
     exec_cmd = build_exec_command(
         ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], "$inner_args_str"
     )
@@ -122,7 +125,7 @@ echo "================================================================"
 
 line_no=0
 while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    [[ -z "$line" || "$line" == "${comment_prefix}"* ]] && continue
     ((line_no++))
 
     line_hash=$(printf '%s' "$EXEC_SIG $line" | md5sum | cut -d ' ' -f 1)
@@ -229,6 +232,8 @@ def build_job_array_mode(
     outer_cfg = config.outer_loops
     evaluated_blocks = [_evaluate_outer_block(block) for block in outer_cfg]
 
+    comment_prefix = inner_cfg.comment_prefix
+
     # 2. Compute the Cartesian product across all outer loop blocks and merge
     outer_combinations = []
     for combo_tuple in itertools.product(*evaluated_blocks):
@@ -327,7 +332,7 @@ echo "======================================================================"
 
 line_no=0
 while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    [[ -z "$line" || "$line" == "${comment_prefix}"* ]] && continue
     ((line_no++))
 
     combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $line" | md5sum | cut -d ' ' -f 1)

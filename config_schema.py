@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
 from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 def determine_loop_q(cfg: dict) -> bool:
@@ -83,19 +83,19 @@ OuterLoopBlock = Annotated[
 # --- 2. Sub-Section Models ---
 
 class ExecutionConfig(BaseModel):
-    language: str
+    interpreter: Optional[str] = Field(default=None)
+    flags: Optional[List[str]] = Field(default_factory=list)
     executable: str
-    flags: List[str] = []
-    modules: List[str] = []
-    env_vars: Dict[str, str] = {}
+    modules: List[str] = Field(default_factory=list)
+    env_vars: Dict[str, str] = Field(default_factory=dict)
 
 
 class SlurmConfig(BaseModel):
-    job_name: str = Field(alias="job-name")
+    job_name: str = Field(default="orchestrator", alias="job-name")
     partition: str
-    nodes: int
+    nodes: int = Field(default=1, alias="nodes") # Default number of nodes is 1 if not specified
     time: str
-    output: str
+    output: str = Field(default="slurm_%j.log", alias="output") # Output set in setup_experiment_directories function if experiment tracking info is provided.
     max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
 
     model_config = {"extra": "allow", "populate_by_name": True}
@@ -103,7 +103,8 @@ class SlurmConfig(BaseModel):
 
 class InnerLoopConfig(BaseModel):
     file_path: Optional[Path] = None
-    delimiter: str = " "
+    delimiter: str = Field(default=" ")
+    comment_prefix: str = Field(default="#")
     arg_names: List[str]
 
     @field_validator("file_path")

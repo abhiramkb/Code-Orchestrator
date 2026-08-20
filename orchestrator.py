@@ -103,6 +103,7 @@ def setup_experiment_directories(
     experiment: Optional[ExperimentConfig],
     slurm: SlurmConfig,
     config_file: Path,
+    mode_index: int,
     dryrun_q: bool
 ) -> None:
     """
@@ -119,7 +120,9 @@ def setup_experiment_directories(
     full_slrm_output_dir = f"{db_path}/{exp_name}/{slrm_output_dir_name}"
     # Mutates the Pydantic model directly
     slurm.output = f"{full_slrm_output_dir}/{exp_name}_%j.out"
-
+    if mode_index == 2:
+        # For array mode, we want to include the indicator in the output filename
+        slurm.output = f"{full_slrm_output_dir}/{exp_name}_%A_%a.out"
     try:
         Path(full_slrm_output_dir).mkdir(parents=True, exist_ok=True)
         print(f"[INFO] Ensured SLURM output directory exists: {full_slrm_output_dir}")
@@ -223,7 +226,7 @@ def generate_slurm_script(config_path, dryrunQ):
     max_concurrent = slurm_cfg.max_concurrent_tasks  # Defined on SlurmConfig model
 
     # 3. Filesystem setup (directories + config backup)
-    setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, dryrunQ)
+    setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ)
 
     # 4. Build experiment strings & execution context
     exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg)
@@ -233,7 +236,7 @@ def generate_slurm_script(config_path, dryrunQ):
     exec_dir = exec_path.parent
     fixed_args_str = format_cli_args(config.args)
     flags_str = " ".join(exec_cfg.flags)
-    exec_sig_components = [exec_cfg.language, flags_str, str(exec_path), fixed_args_str]
+    exec_sig_components = [exec_cfg.interpreter, flags_str, str(exec_path), fixed_args_str]
     exec_sig_str = " ".join(p for p in exec_sig_components if p)
 
     ctx = {
@@ -315,7 +318,7 @@ def validate_script_args(config: AppConfig) -> Tuple[bool, List[str]]:
         Tuple[bool, List[str]]: (is_valid, list_of_unsupported_flags)
     """
     exec_cfg = config.execution
-    interpreter = exec_cfg.language
+    interpreter = exec_cfg.interpreter
     executable_path = str(exec_cfg.executable)
     modules = exec_cfg.modules
 
