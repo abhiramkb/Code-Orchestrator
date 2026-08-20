@@ -125,7 +125,7 @@ echo "================================================================"
 
 line_no=0
 while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" == "${comment_prefix}"* ]] && continue
+    [[ -z "$line" || "$line" == "{comment_prefix}"* ]] && continue
     ((line_no++))
 
     line_hash=$(printf '%s' "$EXEC_SIG $line" | md5sum | cut -d ' ' -f 1)
@@ -332,7 +332,7 @@ echo "======================================================================"
 
 line_no=0
 while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" == "${comment_prefix}"* ]] && continue
+    [[ -z "$line" || "$line" == "{comment_prefix}"* ]] && continue
     ((line_no++))
 
     combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $line" | md5sum | cut -d ' ' -f 1)
