@@ -87,11 +87,22 @@ print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 wait
 """
 
+def _build_inner_arg_mapping(inner_cfg: InnerLoopConfig) -> str:
+    """Generates Bash lines that map array indices to CLI flags."""
+    mapping_lines = []
+    for spec in inner_cfg.args:
+        bash_val = f"${{inner_vals[{spec.column}]}}"
+        if spec.template:
+            # Resolves Python template to Bash variable (e.g., 'val_{val}' -> 'val_${inner_vals[0]}')
+            bash_val = spec.template.format(val=bash_val)
+        mapping_lines.append(f'    inner_args_str+=" --{spec.arg_name} {bash_val}"')
+    return "\n".join(mapping_lines)
+
 def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
-    """Mode 1: Inner-loop-only script generator using InnerLoopConfig model."""
+    """Mode 1: Inner-loop-only script generator."""
     
     inner_cfg = config.inner_loop
-    
+
     if inner_cfg.file_path is None:
         raise ValueError("InnerLoopConfig.file_path cannot be None for Inner Loop Mode.")
 
@@ -102,10 +113,16 @@ def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
         ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], "$inner_args_str"
     )
 
-    arg_mapping = "\n".join(
-        f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
-        for idx, arg_name in enumerate(inner_cfg.arg_names)
-    )
+    # Dynamic Bash mapping for indexed columns
+    arg_mapping = _build_inner_arg_mapping(inner_cfg)
+    arg_names_display = ", ".join(inner_cfg.arg_name_list)
+
+    #print("arg_names_display:", arg_names_display)
+    #exit()
+
+    # Set Bash IFS for custom delimiters (defaults to space)
+    ifs_setting = f"IFS='{inner_cfg.delimiter}' " if inner_cfg.delimiter != " " else ""
+
 
     return f"""{ctx['common_header']}
 
@@ -120,7 +137,7 @@ echo "Working Directory: {ctx['exec_dir']}"
 echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Loop Source File: {target_inner_file}"
-echo "Inner Args: {', '.join(inner_cfg.arg_names)}"
+echo "Inner Args: {arg_names_display}"
 echo "================================================================"
 
 line_no=0
@@ -139,7 +156,7 @@ while read -r line || [ -n "$line" ]; do
         continue
     fi
 
-    read -r -a inner_vals <<< "$line"
+    {ifs_setting}read -r -a inner_vals <<< "$line"
     inner_args_str=""
 {arg_mapping}
 {ctx['exp_args_block']}
@@ -287,10 +304,12 @@ def build_job_array_mode(
         "$outer_args_str $inner_args_str",
     )
 
-    arg_mapping = "\n".join(
-        f'    inner_args_str+=" --{arg_name} ${{inner_vals[{idx}]}}"'
-        for idx, arg_name in enumerate(inner_cfg.arg_names)
-    )
+    # Dynamic Bash mapping for indexed columns
+    arg_mapping = _build_inner_arg_mapping(inner_cfg)
+    arg_names_display = ", ".join(inner_cfg.arg_name_list)
+
+    # Set Bash IFS for custom delimiters (defaults to space)
+    ifs_setting = f"IFS='{inner_cfg.delimiter}' " if inner_cfg.delimiter != " " else ""
 
     script_content = f"""{header_with_array}
 
@@ -327,7 +346,7 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
 echo "Inner Loop Source File: $target_inner_file"
-echo "Inner Args: {', '.join(inner_cfg.arg_names)}"
+echo "Inner Args: {arg_names_display}"
 echo "======================================================================"
 
 line_no=0
@@ -346,7 +365,7 @@ while read -r line || [ -n "$line" ]; do
         continue
     fi
 
-    read -r -a inner_vals <<< "$line"
+    {ifs_setting}read -r -a inner_vals <<< "$line"
     inner_args_str=""
 {arg_mapping}
 {ctx['exp_args_block']}

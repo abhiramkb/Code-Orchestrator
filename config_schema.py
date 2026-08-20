@@ -104,8 +104,9 @@ class SlurmConfig(BaseModel):
 class InnerLoopConfig(BaseModel):
     file_path: Optional[Path] = None
     delimiter: str = Field(default=" ")
-    comment_prefix: str = Field(default="#")
-    arg_names: List[str]
+    comment_prefix: str = "#"
+    args: List[TabularArgSpec] = []
+    arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
 
     @field_validator("file_path")
     @classmethod
@@ -116,6 +117,23 @@ class InnerLoopConfig(BaseModel):
         if check_files and v is not None and not v.is_file():
             raise ValueError(f"Inner loop file does not exist: '{v}'")
         return v
+    
+    @model_validator(mode="after")
+    def migrate_arg_names(self) -> "InnerLoopConfig":
+        """Converts 'arg_names' list into structured 'args' column specifications."""
+        if not self.args and self.arg_names:
+            self.args = [
+                TabularArgSpec(arg_name=name, column=idx)
+                for idx, name in enumerate(self.arg_names)
+            ]
+        if not self.args:
+            raise ValueError("InnerLoopConfig requires 'args' (or simpler 'arg_names').")
+        return self
+
+    @property
+    def arg_name_list(self) -> List[str]:
+        """Convenience property for legends and validation checks."""
+        return [spec.arg_name for spec in self.args]
 
 
 class ExperimentConfig(BaseModel):
