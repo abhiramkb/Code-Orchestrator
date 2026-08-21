@@ -105,7 +105,7 @@ def setup_experiment_directories(
     config_file: Path,
     mode_index: int,
     dryrun_q: bool
-) -> None:
+) -> Path:
     """
     Creates SLURM output directory and backs up the config file if dryrun is False.
     Updates slurm.output directly on the SlurmConfig model.
@@ -129,6 +129,8 @@ def setup_experiment_directories(
     except Exception as e:
         print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
 
+    backup_dir = None # Function returns backup_dir (which is defined below in case it is created)
+
     if not dryrun_q:
         datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = Path(db_path) / exp_name / datetime_str
@@ -138,7 +140,8 @@ def setup_experiment_directories(
             print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
         except Exception as e:
             print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
-
+    return backup_dir
+  
 def _get_generator_git_commit() -> str:
     """Retrieves the git commit hash of the file's repository."""
     try:
@@ -222,14 +225,21 @@ print_args() {
 {print_args_def}"""
 
 
-def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp: str) -> Path:
+def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp: str, backup_dir: Optional[Path] = None) -> Path:
     """
     Writes the script content to a file and prints the location.
     mode_prefix is one of 'single', 'inner', 'array'.
+
+    Also copies script file to backup directory if provided.
     """
     script_file = Path(f"submit_{mode_prefix}_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
     print(f"Generated {mode_prefix}-run SLURM script: {script_file}")
+    if backup_dir is not None:
+      backup_dir.mkdir(parents=True, exist_ok=True)
+      shutil.copy2(script_file, backup_dir / script_file.name)
+      print(f"[INFO] Copied SLURM script to: {backup_dir / script_file.name}")
+  
     return script_file
 
 
@@ -248,8 +258,8 @@ def generate_slurm_script(config_path, dryrunQ):
     experiment_cfg = config.experiment
     max_concurrent = slurm_cfg.max_concurrent_tasks  # Defined on SlurmConfig model
 
-    # 3. Filesystem setup (directories + config backup)
-    setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ)
+    # 3. Filesystem setup (directories + config backup, function returns backup_dir path if created)
+    backup_dir = setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ)
 
     # 4. Build experiment strings & execution context
     exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg)
@@ -281,17 +291,17 @@ def generate_slurm_script(config_path, dryrunQ):
     if mode_index == 0:
         # Mode 0: Single Run
         script_content = build_single_mode(ctx, config)
-        return write_script(script_content, "single", exp_name, timestamp)
+        return write_script(script_content, "single", exp_name, timestamp, backup_dir)
 
     elif mode_index == 1:
         # Mode 1: Inner Loop Only
         script_content = build_inner_loop_mode(ctx, config)
-        return write_script(script_content, "inner", exp_name, timestamp)
+        return write_script(script_content, "inner", exp_name, timestamp, backup_dir)
 
     else:
         # Mode 2: Array Mode (Outer + Inner Loops)
         script_content, total_tasks = build_job_array_mode(ctx, config, max_concurrent)
-        script_file = write_script(script_content, "array", exp_name, timestamp)
+        script_file = write_script(script_content, "array", exp_name, timestamp, backup_dir)
         print(f"({total_tasks} tasks)")
         return script_file
 
