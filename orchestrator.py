@@ -620,10 +620,10 @@ def collect_slurm_results_to_db(config_path: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate and submit SLURM scripts from a JSON config.")
     parser.add_argument(
-        "config_path",
-        nargs="?",
-        default="config.json",
-        help="Path to the JSON configuration file (default: config.json)"
+        "config_paths",
+        nargs="*",
+        default=["config.json"],
+        help="Path to the JSON configuration file(s) (default: config.json)"
     )
     parser.add_argument(
         "--submit",
@@ -647,25 +647,22 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-
-    #cfg = get_dict_from_config_file(args.config)
-    #_,result = extract_config_flags(cfg)
-    #print(result)
-    #exit()
-
-    if args.collect:
-        collect_slurm_results_to_db(args.config_path)
-        exit()
-
     checkargsQ = not args.noargcheck
-    
-    generated_script = generate_slurm_script(args.config_path, args.dryrun)
 
-    if args.dryrun:
-        print(f"\n[INFO] Dry-run: not submitting to SLURM.")
-    elif args.submit:
-        cfg = get_dict_from_config_file(args.config_path)
-        config: AppConfig = validate_config(cfg, args.config_path, args.dryrun)
-        submit_slurm_script(generated_script, config, checkargsQ)
-    else:
-        print(f"\n[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
+    for config_path in args.config_paths:
+        print(f"\n--- Processing: {config_path} ---")
+
+        if args.collect:
+            collect_slurm_results_to_db(config_path)
+            continue
+
+        generated_script = generate_slurm_script(config_path, args.dryrun)
+
+        if args.dryrun:
+            print(f"[INFO] Dry-run: not submitting to SLURM for {config_path}.")
+        elif args.submit:
+            cfg = get_dict_from_config_file(config_path)
+            config: AppConfig = validate_config(cfg, config_path, args.dryrun)
+            submit_slurm_script(generated_script, config, checkargsQ)
+        else:
+            print(f"[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
