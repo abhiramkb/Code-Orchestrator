@@ -43,7 +43,7 @@ def format_cli_args(args_dict: Dict[str, Any]) -> str:
             args_list.append(f'--{k} {v}')
     return " ".join(args_list)
 
-def build_experiment_strings(experiment: Optional[ExperimentConfig]) -> tuple[str, str, str]:
+def build_experiment_strings(experiment: Optional[ExperimentConfig]) -> Tuple[str, str, str]:
     """
     Builds the environment block and argument block for experiment tracking.
     Returns (exp_name, exp_env_block, exp_args_block).
