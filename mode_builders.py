@@ -1,6 +1,7 @@
 from pathlib import Path
 import itertools
 from typing import Any, Dict, List, Optional, Tuple
+from arg_transform import _apply_transform
 
 from config_schema import (
     AppConfig,
@@ -190,7 +191,7 @@ wait
 """
 
 def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
-    """Helper to evaluate a typed outer loop Pydantic block into argument dicts."""
+    """Evaluates a typed outer loop block into argument dictionaries."""
     if isinstance(block, ExplicitOuterLoop):
         return [{block.arg_name: val} for val in block.values]
 
@@ -226,11 +227,16 @@ def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
 
                 row_dict = {}
                 for arg_spec in block.args:
-                    raw_val = cols[arg_spec.column]
+                    val = cols[arg_spec.column]
+
+                    # 1. Apply numeric transformation if requested
+                    if arg_spec.transform:
+                        val = _apply_transform(val, arg_spec.transform)
+
+                    # 2. Apply string template if defined
                     if arg_spec.template:
-                        val = arg_spec.template.format(val=raw_val)
-                    else:
-                        val = raw_val
+                        val = arg_spec.template.format(val=val)
+
                     row_dict[arg_spec.arg_name] = val
 
                 rows.append(row_dict)

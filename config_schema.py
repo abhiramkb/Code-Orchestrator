@@ -53,6 +53,7 @@ class TabularArgSpec(BaseModel):
     arg_name: str
     column: int
     template: Optional[str] = None
+    transform: Optional[str] = None  # e.g., "10^x", "10**x", "log10", "exp"
 
 
 class TabularOuterLoop(BaseModel):
