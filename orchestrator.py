@@ -43,7 +43,7 @@ def format_cli_args(args_dict: Dict[str, Any]) -> str:
             args_list.append(f'--{k} {v}')
     return " ".join(args_list)
 
-def build_experiment_strings(experiment: Optional[ExperimentConfig]) -> Tuple[str, str, str]:
+def build_experiment_strings(experiment: Optional[ExperimentConfig], mode_index) -> Tuple[str, str, str]:
     """
     Builds the environment block and argument block for experiment tracking.
     Returns (exp_name, exp_env_block, exp_args_block).
@@ -60,6 +60,8 @@ mkdir -p "$CHECKPOINT_DIR"
     exp_name = experiment.experiment_name
     slrm_output_dir_name = experiment.slrm_output_dir
 
+    job_id_var = "SLURM_ARRAY_JOB_ID" if config.mode_index == 2 else "SLURM_JOB_ID"
+
     exp_env_block = f"""
 # =========================================================================
 # EXPERIMENT TRACKING
@@ -69,7 +71,7 @@ export EXPERIMENT_NAME="{exp_name}"
 export SLRM_OUTPUT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/{slrm_output_dir_name}"
 
 # Safe directory creation for the specific job
-export JOB_ID=${{SLURM_JOB_ID:-$$}}
+export JOB_ID=${{{job_id_var}:-$$}}
 export SAVE_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/$JOB_ID"
 export CHECKPOINT_DIR="$RESULT_DATABASE_PATH/$EXPERIMENT_NAME/checkpoints"
 
@@ -262,7 +264,7 @@ def generate_slurm_script(config_path, dryrunQ):
     backup_dir = setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ)
 
     # 4. Build experiment strings & execution context
-    exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg)
+    exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg, config.mode_index)
     common_header = build_common_header(slurm_cfg, exec_cfg, exp_env_block)
 
     exec_path = Path(exec_cfg.executable).resolve()
