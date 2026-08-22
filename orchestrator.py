@@ -60,7 +60,7 @@ mkdir -p "$CHECKPOINT_DIR"
     exp_name = experiment.experiment_name
     slrm_output_dir_name = experiment.slrm_output_dir
 
-    job_id_var = "SLURM_ARRAY_JOB_ID" if config.mode_index == 2 else "SLURM_JOB_ID"
+    job_id_var = "SLURM_ARRAY_JOB_ID" if mode_index == 2 else "SLURM_JOB_ID"
 
     exp_env_block = f"""
 # =========================================================================
