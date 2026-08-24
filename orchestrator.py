@@ -17,6 +17,9 @@ from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmCon
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
 
+# Utility functions for argument formatting
+from utils import format_cli_args
+
 def get_dict_from_config_file(config_path) -> dict:
     config_file = Path(config_path)
     if not config_file.is_file():
@@ -30,18 +33,6 @@ def get_dict_from_config_file(config_path) -> dict:
             print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
             sys.exit(1)
     return cfg
-
-
-
-def format_cli_args(args_dict: Dict[str, Any]) -> str:
-    """Formats key-value argument pairs into standard CLI flag strings."""
-    args_list = []
-    for k, v in args_dict.items():
-        if isinstance(v, str):
-            args_list.append(f'--{k} \\"{v}\\"')
-        else:
-            args_list.append(f'--{k} {v}')
-    return " ".join(args_list)
 
 def build_experiment_strings(experiment: Optional[ExperimentConfig]) -> Tuple[str, str, str]:
     """

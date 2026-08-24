@@ -2,6 +2,7 @@ from pathlib import Path
 import itertools
 from typing import Any, Dict, List, Optional, Tuple
 from arg_transform import _apply_transform
+from utils import format_cli_arg, format_cli_args, strip_hyphens
 
 from config_schema import (
     AppConfig,
@@ -96,7 +97,11 @@ def _build_inner_arg_mapping(inner_cfg: InnerLoopConfig) -> str:
         if spec.template:
             # Resolves Python template to Bash variable (e.g., 'val_{val}' -> 'val_${inner_vals[0]}')
             bash_val = spec.template.format(val=bash_val)
-        mapping_lines.append(f'    inner_args_str+=" --{spec.arg_name} {bash_val}"')
+
+        # Dynamically format the flag name (handles single-char '-x' or multi-char '--foo')
+        flag = format_cli_arg(spec.arg_name)
+        mapping_lines.append(f'    inner_args_str+=" {flag} {bash_val}"')
+        
     return "\n".join(mapping_lines)
 
 def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
@@ -279,8 +284,8 @@ def build_job_array_mode(
     bash_outer_args, bash_outer_descs, bash_target_files = [], [], []
 
     for combo_dict in outer_combinations:
-        outer_args_str = " ".join(f"--{k} {v}" for k, v in combo_dict.items())
-        outer_desc = ", ".join(f"{k}={v}" for k, v in combo_dict.items())
+        outer_args_str = format_cli_args(combo_dict)
+        outer_desc = ", ".join(f"{strip_hyphens(k)}={v}" for k, v in combo_dict.items())
 
         target_inner_file = inner_cfg.file_path
         if target_inner_file:
