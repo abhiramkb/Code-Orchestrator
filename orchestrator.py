@@ -1,4 +1,5 @@
 import json
+import yaml
 from datetime import datetime
 import shutil
 import itertools
@@ -21,18 +22,41 @@ from mode_builders import build_single_mode, build_inner_loop_mode, build_job_ar
 from utils import format_cli_args
 
 def get_dict_from_config_file(config_path) -> dict:
-    config_file = Path(config_path)
-    if not config_file.is_file():
-        print(f"[ERROR] Configuration file '{config_path}' not found.", file=sys.stderr)
-        sys.exit(1)
+  config_file = Path(config_path)
+  if not config_file.is_file():
+    print(
+        f"[ERROR] Configuration file '{config_path}' not found.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
-    with open(config_file) as f:
-        try:
-            cfg = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Invalid JSON in '{config_path}': {e}", file=sys.stderr)
-            sys.exit(1)
-    return cfg
+  suffix = config_file.suffix.lower()
+
+  with open(config_file, "r", encoding="utf-8") as f:
+    try:
+      if suffix == ".json":
+        cfg = json.load(f)
+      elif suffix in (".yaml", ".yml"):
+        cfg = yaml.safe_load(f)
+      else:
+        # Fallback for unrecognized extensions: YAML parses valid JSON natively
+        cfg = yaml.safe_load(f)
+    except (json.JSONDecodeError, yaml.YAMLError) as e:
+      print(
+          f"[ERROR] Failed to parse configuration file '{config_path}': {e}",
+          file=sys.stderr,
+      )
+      sys.exit(1)
+
+  if not isinstance(cfg, dict):
+    print(
+        f"[ERROR] Configuration in '{config_path}' must be a valid YAML or JSON file interpretable as a key-value mapping"
+        " (dictionary).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+  return cfg
 
 
 def build_experiment_strings(experiment: Optional[ExperimentConfig], mode_index) -> Tuple[str, str, str]:
