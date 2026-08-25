@@ -26,8 +26,6 @@ def format_cli_args(args_dict: Dict[str, Any]) -> str:
                 args_list.append(flag)
         elif v is None:
             continue
-        elif isinstance(v, str):
-            args_list.append(f'{flag} \\"{v}\\"')
         else:
             args_list.append(f'{flag} {v}')
 
