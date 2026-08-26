@@ -114,6 +114,20 @@ class TabularInnerLoop(BaseModel):
     args: List[TabularArgSpec] = []
     arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
 
+    # In case an old config uses 'inner_loop' as a dict without a 'type', we can migrate it to the new structure.
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_inner_loop(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        inner_loop = data.get("inner_loop")
+
+        if isinstance(inner_loop, dict) and "type" not in inner_loop:
+            inner_loop["type"] = "tabular_file"
+
+        return data
+
     @field_validator("file_path")
     @classmethod
     def check_inner_file(cls, v: Optional[Path], info: ValidationInfo) -> Optional[Path]:
