@@ -34,7 +34,7 @@
   "inner_loop": {
     "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt",
     "delimiter": " ",
-    "arg_names": ["Q", "beta", "x"]
+    "arg_names": ["--Q", "beta", "--x"]
   },
   "outer_loops": [
     {
