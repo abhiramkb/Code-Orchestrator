@@ -5,9 +5,9 @@
     "partition": "small",
     "nodes": 1,
     "ntasks": 1,
-    "time": "23:59:00",
+    "time": "1-12:59:00",
     "cpus-per-task": 16,
-    "mem": "10G",
+    "mem": "20G",
     "output": "slurm_%j.log"
   },
   "execution": {
@@ -58,8 +58,6 @@
     }
   ],
   "args": {
-    "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
-    "Csq": 915,
     "xmax": 160.0,
     "neval": 4e8
   }
