@@ -101,32 +101,13 @@ class SlurmConfig(BaseModel):
 
     model_config = {"extra": "allow", "populate_by_name": True}
 
-class ExplicitInnerLoop(BaseModel):
-    type: Literal["explicit"] = "explicit"
-    arg_name: str
-    values: List[Any]
 
-class TabularInnerLoop(BaseModel):
-    type: Literal["tabular_file"]
+class InnerLoopConfig(BaseModel):
     file_path: Optional[Path] = None
     delimiter: str = Field(default=" ")
     comment_prefix: str = "#"
     args: List[TabularArgSpec] = []
     arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
-
-    # In case an old config uses 'inner_loop' as a dict without a 'type', we can migrate it to the new structure.
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_inner_loop(cls, data):
-        if not isinstance(data, dict):
-            return data
-
-        inner_loop = data.get("inner_loop")
-
-        if isinstance(inner_loop, dict) and "type" not in inner_loop:
-            inner_loop["type"] = "tabular_file"
-
-        return data
 
     @field_validator("file_path")
     @classmethod
@@ -139,7 +120,7 @@ class TabularInnerLoop(BaseModel):
         return v
     
     @model_validator(mode="after")
-    def migrate_arg_names(self) -> "TabularInnerLoop":
+    def migrate_arg_names(self) -> "InnerLoopConfig":
         """Converts 'arg_names' list into structured 'args' column specifications."""
         if not self.args and self.arg_names:
             self.args = [
@@ -147,19 +128,13 @@ class TabularInnerLoop(BaseModel):
                 for idx, name in enumerate(self.arg_names)
             ]
         if not self.args:
-            raise ValueError("TabularInnerLoop requires 'args' (or simpler 'arg_names').")
+            raise ValueError("InnerLoopConfig requires 'args' (or simpler 'arg_names').")
         return self
 
     @property
     def arg_name_list(self) -> List[str]:
         """Convenience property for legends and validation checks."""
         return [spec.arg_name for spec in self.args]
-
-# Tagged Union discriminator routes validation based on the 'type' field
-InnerLoop = Annotated[
-    Union[ExplicitInnerLoop, TabularInnerLoop],
-    Field(discriminator="type"),
-]
 
 
 class ExperimentConfig(BaseModel):
@@ -175,7 +150,7 @@ class AppConfig(BaseModel):
     loopQ: Optional[bool] = None  # Optional explicit flag from config JSON
     execution: ExecutionConfig
     slurm: SlurmConfig
-    inner_loop: Optional[InnerLoop] = None
+    inner_loop: Optional[InnerLoopConfig] = None
     outer_loops: List[OuterLoopBlock] = []
     experiment: Optional[ExperimentConfig] = None
     args: Dict[str, Any] = {}
