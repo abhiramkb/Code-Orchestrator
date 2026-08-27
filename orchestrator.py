@@ -454,11 +454,12 @@ def submit_slurm_script(
 # Collection function from https://share.gemini.google/ldX5zTud8zOv, https://share.gemini.google/IEM7GOQgmFCx
 # Note that this function is specific to the NLODiffraction project. A more general collection function needs
 # to be developed.
-def collect_slurm_results_to_db(config_path: str) -> None:
+def collect_slurm_results_to_db(config_path: str, job_id: Optional[str]=None) -> None:
     """Collects SLURM job execution results and metadata into a SQLite database.
 
     Args:
         config_path (str): Path to the orchestrator JSON configuration file.
+        job_id (Optional[str]): Specific job ID to collect results for. If None, collects all jobs.
     """
     # 1. Load configuration file
     config = get_dict_from_config_file(config_path)
@@ -472,6 +473,8 @@ def collect_slurm_results_to_db(config_path: str) -> None:
     exp_dir = os.path.join(result_db_path, exp_name)
     slurm_dir = os.path.join(exp_dir, slurm_output_dir)
     db_file_path = os.path.join(exp_dir, "results.db")
+    if job_id is not None:
+        db_file_path = os.path.join(exp_dir, f"results_{job_id}.db")
 
     if not os.path.exists(slurm_dir):
         raise FileNotFoundError(
@@ -495,9 +498,13 @@ def collect_slurm_results_to_db(config_path: str) -> None:
         file_path = os.path.join(slurm_dir, filename)
         if not os.path.isfile(file_path):
             continue
+        elif job_id and job_id not in filename:
+            # If job_id is specified, skip files that don't correspond to it
+            continue
         else:
             print("Processing file: ",filename)
-
+        
+        
         # Extract job_id from filename pattern: <experiment_name>_<job_id>
         job_id_match = re.search(rf"{re.escape(exp_name)}_(\d+)", filename)
         if not job_id_match:
@@ -673,6 +680,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Collects results from finished SLURM jobs."
     )
+    parser.add_argument(
+            "--collect-job",
+            default=None,
+            help="Collects results from finished SLURM jobs."
+        )
     args = parser.parse_args()
 
     checkargsQ = not args.noargcheck
@@ -681,6 +693,9 @@ if __name__ == "__main__":
         print(f"\n--- Processing: {config_path} ---")
 
         if args.collect:
+            collect_slurm_results_to_db(config_path)
+            continue
+        if args.collect_job is not None:
             collect_slurm_results_to_db(config_path)
             continue
 
