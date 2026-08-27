@@ -35,13 +35,13 @@ def determine_loop_q(cfg: dict) -> bool:
 
 # --- 1. Outer Loop Polymorphic Models ---
 
-class ExplicitOuterLoop(BaseModel):
+class ExplicitLoop(BaseModel):
     type: Literal["explicit"] = "explicit"
     arg_name: str
     values: List[Any]
 
 
-class RangeOuterLoop(BaseModel):
+class RangeLoop(BaseModel):
     type: Literal["range"]
     arg_name: str
     start: float
@@ -76,7 +76,7 @@ class TabularOuterLoop(BaseModel):
 
 # Tagged Union discriminator routes validation based on the 'type' field
 OuterLoopBlock = Annotated[
-    Union[ExplicitOuterLoop, RangeOuterLoop, TabularOuterLoop],
+    Union[ExplicitLoop, RangeLoop, TabularOuterLoop],
     Field(discriminator="type"),
 ]
 
@@ -100,11 +100,6 @@ class SlurmConfig(BaseModel):
     max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
 
     model_config = {"extra": "allow", "populate_by_name": True}
-
-class ExplicitInnerLoop(BaseModel):
-    type: Literal["explicit"] = "explicit"
-    arg_name: str
-    values: List[Any]
 
 class TabularInnerLoop(BaseModel):
     type: Literal["tabular_file"]
@@ -157,7 +152,7 @@ class TabularInnerLoop(BaseModel):
 
 # Tagged Union discriminator routes validation based on the 'type' field
 InnerLoop = Annotated[
-    Union[ExplicitInnerLoop, TabularInnerLoop],
+    Union[ExplicitLoop, TabularInnerLoop],
     Field(discriminator="type"),
 ]
 

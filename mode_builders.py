@@ -2,16 +2,17 @@ from pathlib import Path
 import itertools
 from typing import Any, Dict, List, Optional, Tuple
 from arg_transform import _apply_transform
-from utils import format_cli_arg, format_cli_args, strip_hyphens
+from utils import format_cli_args, strip_hyphens
 
 from config_schema import (
     AppConfig,
     ExecutionConfig,
-    ExplicitOuterLoop,
-    InnerLoopConfig,
-    OuterLoopBlock,
-    RangeOuterLoop,
+    ExplicitLoop,
+    RangeLoop,
+    TabularInnerLoop,
     TabularOuterLoop,
+    InnerLoop,
+    OuterLoopBlock
 )
 
 def build_exec_command(
@@ -89,6 +90,61 @@ print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 wait
 """
 
+def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
+    """Evaluates a typed inner loop into argument dictionaries."""
+    if isinstance(loop, ExplicitLoop):
+        return [{loop.arg_name: val} for val in loop.values]
+
+    elif isinstance(loop, RangeLoop):
+        arg_name = loop.arg_name
+        start, stop, step = loop.start, loop.stop, loop.step
+        values = []
+
+        if any(isinstance(x, float) for x in (start, stop, step)):
+            curr = start
+            while (step > 0 and curr < stop) or (step < 0 and curr > stop):
+                values.append(round(curr, 10))
+                curr += step
+        else:
+            values = list(range(int(start), int(stop), int(step)))
+
+        return [{arg_name: val} for val in values]
+
+    elif isinstance(loop, TabularInnerLoop):
+        file_path = loop.file_path
+        rows = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line_str = line.strip()
+                if loop.skip_blank_lines and not line_str:
+                    continue
+                if loop.comment_prefix and line_str.startswith(loop.comment_prefix):
+                    continue
+
+                if loop.delimiter and loop.delimiter != " ":
+                    cols = [c.strip() for c in line_str.split(loop.delimiter)]
+                else:
+                    cols = line_str.split()
+
+                row_dict = {}
+                for arg_spec in loop.args:
+                    val = cols[arg_spec.column]
+
+                    # 1. Apply numeric transformation if requested
+                    if arg_spec.transform:
+                        val = _apply_transform(val, arg_spec.transform)
+
+                    # 2. Apply string template if defined
+                    if arg_spec.template:
+                        val = arg_spec.template.format(val=val)
+
+                    row_dict[arg_spec.arg_name] = val
+
+                rows.append(row_dict)
+        return rows
+
+    raise ValueError(f"Unsupported inner_loop type: '{type(loop)}'")
+
 def _build_inner_arg_mapping(inner_cfg: InnerLoopConfig) -> str:
     """Generates Bash lines that map array indices to CLI flags."""
     mapping_lines = []
@@ -106,29 +162,22 @@ def _build_inner_arg_mapping(inner_cfg: InnerLoopConfig) -> str:
 
 def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
     """Mode 1: Inner-loop-only script generator."""
-    
-    inner_cfg = config.inner_loop
+    evaluated_inner = _evaluate_inner_loop(config.inner_loop)
 
-    if inner_cfg.file_path is None:
-        raise ValueError("InnerLoopConfig.file_path cannot be None for Inner Loop Mode.")
 
-    target_inner_file = str(inner_cfg.file_path.resolve())
+    bash_inner_args = []
+    for item_dict in evaluated_inner:
+        args_str = format_cli_args(item_dict)
+        bash_inner_args.append(f'    "{args_str}"')
 
-    comment_prefix = inner_cfg.comment_prefix
+    args_array_block = "\n".join(bash_inner_args)
+
+    arg_names = list(evaluated_inner[0].keys()) if evaluated_inner else []
+    arg_names_display = ", ".join(arg_names)
+
     exec_cmd = build_exec_command(
         ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], "$inner_args_str"
     )
-
-    # Dynamic Bash mapping for indexed columns
-    arg_mapping = _build_inner_arg_mapping(inner_cfg)
-    arg_names_display = ", ".join(inner_cfg.arg_name_list)
-
-    #print("arg_names_display:", arg_names_display)
-    #exit()
-
-    # Set Bash IFS for custom delimiters (defaults to space)
-    ifs_setting = f"IFS='{inner_cfg.delimiter}' " if inner_cfg.delimiter != " " else ""
-
 
     return f"""{ctx['common_header']}
 
@@ -136,6 +185,10 @@ def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
 cd "{ctx['exec_dir']}" || exit 1
 
 EXEC_SIG="{ctx['exec_sig_str']}"
+
+INNER_ARGS=(
+{args_array_block}
+)
 
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
@@ -147,11 +200,10 @@ echo "Inner Args: {arg_names_display}"
 echo "================================================================"
 
 line_no=0
-while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" == "{comment_prefix}"* ]] && continue
+for inner_args_str in "${{INNER_ARGS[@]}}"; do
     ((line_no++))
 
-    line_hash=$(printf '%s' "$EXEC_SIG $line" | md5sum | cut -d ' ' -f 1)
+    line_hash=$(printf '%s' "$EXEC_SIG $inner_args_str" | md5sum | cut -d ' ' -f 1)
     indicator="L${{line_no}}"
     indicator_checkpoint="L${{line_no}}_${{line_hash}}"
 
@@ -162,9 +214,7 @@ while read -r line || [ -n "$line" ]; do
         continue
     fi
 
-    {ifs_setting}read -r -a inner_vals <<< "$line"
-    inner_args_str=""
-{arg_mapping}
+
 {ctx['exp_args_block']}
 
     print_args "$indicator" "{ctx['fixed_args_str']} $inner_args_str $exp_args"
@@ -190,7 +240,7 @@ while read -r line || [ -n "$line" ]; do
         echo ""
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
-done < "{target_inner_file}"
+done
 
 wait
 """
