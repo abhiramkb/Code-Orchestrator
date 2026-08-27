@@ -19,7 +19,7 @@
     "env_vars": {}
   },
   "experiment": {
-    "result_database_path": "/projappl/lappi/abhiram/diptrip_database",
+    "result_database_path": "/scratch/lappi/abhiram/diptrip_database",
     "experiment_name": "allbks_mvgam_balsd",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
@@ -30,7 +30,7 @@
   "inner_loop": {
     "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt",
     "delimiter": " ",
-    "arg_names": ["Q", "beta", "x"]
+    "arg_names": ["--Q", "beta", "--x"]
   },
   "outer_loops": [
     {

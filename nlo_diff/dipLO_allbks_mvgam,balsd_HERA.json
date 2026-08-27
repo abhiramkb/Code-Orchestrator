@@ -12,7 +12,7 @@
   },
   "execution": {
     "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dipLO/sf_lo_sdaw_dip_T.jl",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dipLO/sf_lo_sdaw_dip_L.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
@@ -34,7 +34,7 @@
   "inner_loop": {
     "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt",
     "delimiter": " ",
-    "arg_names": ["Q", "beta", "x"]
+    "arg_names": ["--Q", "beta", "--x"]
   },
   "outer_loops": [
     {

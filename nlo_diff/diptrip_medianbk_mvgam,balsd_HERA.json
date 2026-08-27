@@ -30,7 +30,7 @@
   "inner_loop": {
     "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_highQ_smallx.txt",
     "delimiter": " ",
-    "arg_names": ["Q", "beta", "x"]
+    "arg_names": ["--Q", "beta", "--x"]
   },
   "args": {
     "dipole_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat",
