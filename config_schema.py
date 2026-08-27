@@ -108,6 +108,7 @@ class TabularInnerLoop(BaseModel):
     comment_prefix: str = "#"
     args: List[TabularArgSpec] = []
     arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
+    skip_blank_lines: bool = True
 
     # In case an old config uses 'inner_loop' as a dict without a 'type', we can migrate it to the new structure.
     @model_validator(mode="before")
@@ -174,6 +175,17 @@ class AppConfig(BaseModel):
     outer_loops: List[OuterLoopBlock] = []
     experiment: Optional[ExperimentConfig] = None
     args: Dict[str, Any] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def preprocess_legacy_inner_loop(cls, data: Any) -> Any:
+        """Inject default 'type' into inner_loop dictionary before discriminator check."""
+        if isinstance(data, dict):
+            inner_loop = data.get("inner_loop")
+            if isinstance(inner_loop, dict) and "type" not in inner_loop:
+                # Modifying a shallow copy or in-place to set default discriminator tag
+                data["inner_loop"]["type"] = "tabular_file"
+        return data
 
     @property
     def mode_info(self) -> Tuple[bool, int]:

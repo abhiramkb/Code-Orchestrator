@@ -145,7 +145,7 @@ def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
 
     raise ValueError(f"Unsupported inner_loop type: '{type(loop)}'")
 
-def _build_inner_arg_mapping(inner_cfg: InnerLoopConfig) -> str:
+def _build_inner_arg_mapping(inner_cfg: InnerLoop) -> str:
     """Generates Bash lines that map array indices to CLI flags."""
     mapping_lines = []
     for spec in inner_cfg.args:
@@ -195,7 +195,6 @@ echo "Mode: Inner Loop Only"
 echo "Working Directory: {ctx['exec_dir']}"
 echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
-echo "Inner Loop Source File: {target_inner_file}"
 echo "Inner Args: {arg_names_display}"
 echo "================================================================"
 
