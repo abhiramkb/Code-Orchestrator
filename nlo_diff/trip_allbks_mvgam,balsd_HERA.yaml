@@ -28,9 +28,9 @@ inner_loop:
   file_path: /projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt
   delimiter: " "
   arg_names:
-    - Q
+    - "--Q"
     - beta
-    - x
+    - "--x"
 
 outer_loops:
   - type: tabular_file
