@@ -696,7 +696,7 @@ if __name__ == "__main__":
             collect_slurm_results_to_db(config_path)
             continue
         if args.collect_job is not None:
-            collect_slurm_results_to_db(config_path)
+            collect_slurm_results_to_db(config_path, job_id=args.collect_job)
             continue
 
         generated_script = generate_slurm_script(config_path, args.dryrun)
