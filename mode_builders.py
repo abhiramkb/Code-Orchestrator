@@ -288,15 +288,12 @@ def build_job_array_mode(
     ctx: Dict[str, Any], config: AppConfig,
     max_concurrent: Optional[int] = None,
 ) -> Tuple[str, int]:
-    """Mode 2: Outer + Inner loop SLURM Job Array script generator."""
-    # 1. Evaluate each typed Pydantic block into a list of argument dictionaries
+    """Mode 2: Outer + Inner loop SLURM Job Array script generator unrolled via Python."""
     inner_cfg = config.inner_loop
     outer_cfg = config.outer_loops
+
+    # 1. Evaluate outer loop combinations
     evaluated_blocks = [_evaluate_outer_block(block) for block in outer_cfg]
-
-    comment_prefix = inner_cfg.comment_prefix
-
-    # 2. Compute the Cartesian product across all outer loop blocks and merge
     outer_combinations = []
     for combo_tuple in itertools.product(*evaluated_blocks):
         merged_combo = {}
@@ -306,55 +303,37 @@ def build_job_array_mode(
 
     total_tasks = len(outer_combinations)
 
+    # 2. Evaluate shared inner loop arguments once
+    evaluated_inner = _evaluate_inner_loop(inner_cfg)
+    bash_inner_args = []
+    all_inner_arg_names = set()
+
+    for item in evaluated_inner:
+        bash_inner_args.append(f'    "{format_cli_args(item)}"')
+        all_inner_arg_names.update(item.keys())
+
+    inner_args_array_block = "\n".join(bash_inner_args)
+    arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
+
+    # 3. Format SBATCH header with array bounds
     array_range = f"0-{total_tasks - 1}"
     if max_concurrent:
         array_range += f"%{max_concurrent}"
 
-    # Inject array SBATCH directive after #!/bin/bash
     lines = ctx["common_header"].splitlines()
     lines.insert(1, f"#SBATCH --array={array_range}")
     header_with_array = "\n".join(lines)
 
-    bash_outer_args, bash_outer_descs, bash_inner_args_sets = [], [], []
-    all_inner_arg_names = set()
-
+    # 4. Build outer loop parameter Bash arrays
+    bash_outer_args, bash_outer_descs = [], []
     for combo_dict in outer_combinations:
         outer_args_str = format_cli_args(combo_dict)
         outer_desc = ", ".join(f"{strip_hyphens(k)}={v}" for k, v in combo_dict.items())
-
-         # Resolve target inner file if inner_cfg uses a dynamic file mapped from outer loops
-        target_inner_file = getattr(inner_cfg, "file_path", None)
-        target_inner_file_path = None
-        if target_inner_file:
-            target_inner_file_path = Path(target_inner_file).resolve()
-        else:
-            target_inner_file_str = ""
-            for loop_cfg in outer_cfg:
-                arg_name = getattr(loop_cfg, "arg_name", None)
-                val = combo_dict.get(arg_name) if arg_name else None
-                inner_files = getattr(loop_cfg, "inner_files", None)
-                if inner_files and val in inner_files:
-                    target_inner_file_path = Path(inner_files[val]).resolve()
-                    break
-
-        evaluated_inner = _evaluate_inner_loop(inner_cfg)
-
-        formatted_inner_lines = []
-        for item in evaluated_inner:
-            formatted_inner_lines.append(format_cli_args(item))
-            all_inner_arg_names.update(item.keys())
-
-        inner_set_str = "\n".join(formatted_inner_lines)
-
         bash_outer_args.append(f'    "{outer_args_str}"')
         bash_outer_descs.append(f'    "{outer_desc}"')
-        bash_inner_args_sets.append(f'    "{inner_set_str}"')
 
-    args_array_block = "\n".join(bash_outer_args)
-    descs_array_block = "\n".join(bash_outer_descs)
-    inner_sets_array_block = "\n".join(bash_inner_args_sets)
-
-    arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
+    outer_args_array_block = "\n".join(bash_outer_args)
+    outer_descs_array_block = "\n".join(bash_outer_descs)
 
     exec_cmd = build_exec_command(
         ctx["exec_cfg"],
@@ -370,17 +349,18 @@ cd "{ctx['exec_dir']}" || exit 1
 
 EXEC_SIG="{ctx['exec_sig_str']}"
 
-# Parameter mapping arrays built by orchestrator.py
+# Outer loop parameter combinations mapped by SLURM Task ID
 OUTER_ARGS=(
-{args_array_block}
+{outer_args_array_block}
 )
 
 OUTER_DESCS=(
-{descs_array_block}
+{outer_descs_array_block}
 )
 
-INNER_ARGS_SETS=(
-{inner_sets_array_block}
+# Shared inner loop parameter combinations
+INNER_ARGS=(
+{inner_args_array_block}
 )
 
 # Safe task ID resolution (defaults to 0 if executed manually outside SLURM)
@@ -388,7 +368,6 @@ TASK_ID=${{SLURM_ARRAY_TASK_ID:-0}}
 
 outer_args_str="${{OUTER_ARGS[$TASK_ID]}}"
 outer_desc="${{OUTER_DESCS[$TASK_ID]}}"
-target_inner_file="${{TARGET_FILES[$TASK_ID]}}"
 
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
@@ -401,8 +380,7 @@ echo "Inner Args: {arg_names_display}"
 echo "======================================================================"
 
 line_no=0
-while IFS= read -r inner_args_str || [ -n "$inner_args_str" ]; do
-    [[ -z "$inner_args_str" ]] && continue
+for inner_args_str in "${{INNER_ARGS[@]}}"; do
     ((++line_no))
 
     combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $inner_args_str" | md5sum | cut -d ' ' -f 1)
@@ -440,7 +418,7 @@ while IFS= read -r inner_args_str || [ -n "$inner_args_str" ]; do
         printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
-done <<< "$inner_args_raw"
+done
 
 wait
 """
