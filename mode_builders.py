@@ -231,10 +231,10 @@ wait
 
 def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
     """Evaluates a typed outer loop block into argument dictionaries."""
-    if isinstance(block, ExplicitOuterLoop):
+    if isinstance(block, ExplicitLoop):
         return [{block.arg_name: val} for val in block.values]
 
-    elif isinstance(block, RangeOuterLoop):
+    elif isinstance(block, RangeLoop):
         arg_name = block.arg_name
         start, stop, step = block.start, block.stop, block.step
         values = []
@@ -337,7 +337,7 @@ def build_job_array_mode(
                     target_inner_file_path = Path(inner_files[val]).resolve()
                     break
 
-        evaluated_inner = _evaluate_inner_loop(inner_cfg, override_file_path=target_inner_file_path)
+        evaluated_inner = _evaluate_inner_loop(inner_cfg)
 
         formatted_inner_lines = []
         for item in evaluated_inner:
@@ -352,7 +352,9 @@ def build_job_array_mode(
 
     args_array_block = "\n".join(bash_outer_args)
     descs_array_block = "\n".join(bash_outer_descs)
-    files_array_block = "\n".join(bash_target_files)
+    inner_sets_array_block = "\n".join(bash_inner_args_sets)
+
+    arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
 
     exec_cmd = build_exec_command(
         ctx["exec_cfg"],
