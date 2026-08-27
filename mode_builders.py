@@ -145,21 +145,6 @@ def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
 
     raise ValueError(f"Unsupported inner_loop type: '{type(loop)}'")
 
-def _build_inner_arg_mapping(inner_cfg: InnerLoop) -> str:
-    """Generates Bash lines that map array indices to CLI flags."""
-    mapping_lines = []
-    for spec in inner_cfg.args:
-        bash_val = f"${{inner_vals[{spec.column}]}}"
-        if spec.template:
-            # Resolves Python template to Bash variable (e.g., 'val_{val}' -> 'val_${inner_vals[0]}')
-            bash_val = spec.template.format(val=bash_val)
-
-        # Dynamically format the flag name (handles single-char '-x' or multi-char '--foo')
-        flag = format_cli_arg(spec.arg_name)
-        mapping_lines.append(f'    inner_args_str+=" {flag} {bash_val}"')
-        
-    return "\n".join(mapping_lines)
-
 def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
     """Mode 1: Inner-loop-only script generator."""
     evaluated_inner = _evaluate_inner_loop(config.inner_loop)
@@ -330,15 +315,18 @@ def build_job_array_mode(
     lines.insert(1, f"#SBATCH --array={array_range}")
     header_with_array = "\n".join(lines)
 
-    bash_outer_args, bash_outer_descs, bash_target_files = [], [], []
+    bash_outer_args, bash_outer_descs, bash_inner_args_sets = [], [], []
+    all_inner_arg_names = set()
 
     for combo_dict in outer_combinations:
         outer_args_str = format_cli_args(combo_dict)
         outer_desc = ", ".join(f"{strip_hyphens(k)}={v}" for k, v in combo_dict.items())
 
-        target_inner_file = inner_cfg.file_path
+         # Resolve target inner file if inner_cfg uses a dynamic file mapped from outer loops
+        target_inner_file = getattr(inner_cfg, "file_path", None)
+        target_inner_file_path = None
         if target_inner_file:
-            target_inner_file_str = str(target_inner_file.resolve())
+            target_inner_file_path = Path(target_inner_file).resolve()
         else:
             target_inner_file_str = ""
             for loop_cfg in outer_cfg:
@@ -346,12 +334,21 @@ def build_job_array_mode(
                 val = combo_dict.get(arg_name) if arg_name else None
                 inner_files = getattr(loop_cfg, "inner_files", None)
                 if inner_files and val in inner_files:
-                    target_inner_file_str = str(Path(inner_files[val]).resolve())
+                    target_inner_file_path = Path(inner_files[val]).resolve()
                     break
+
+        evaluated_inner = _evaluate_inner_loop(inner_cfg, override_file_path=target_inner_file_path)
+
+        formatted_inner_lines = []
+        for item in evaluated_inner:
+            formatted_inner_lines.append(format_cli_args(item))
+            all_inner_arg_names.update(item.keys())
+
+        inner_set_str = "\n".join(formatted_inner_lines)
 
         bash_outer_args.append(f'    "{outer_args_str}"')
         bash_outer_descs.append(f'    "{outer_desc}"')
-        bash_target_files.append(f'    "{target_inner_file_str}"')
+        bash_inner_args_sets.append(f'    "{inner_set_str}"')
 
     args_array_block = "\n".join(bash_outer_args)
     descs_array_block = "\n".join(bash_outer_descs)
@@ -363,13 +360,6 @@ def build_job_array_mode(
         ctx["fixed_args_str"],
         "$outer_args_str $inner_args_str",
     )
-
-    # Dynamic Bash mapping for indexed columns
-    arg_mapping = _build_inner_arg_mapping(inner_cfg)
-    arg_names_display = ", ".join(inner_cfg.arg_name_list)
-
-    # Set Bash IFS for custom delimiters (defaults to space)
-    ifs_setting = f"IFS='{inner_cfg.delimiter}' " if inner_cfg.delimiter != " " else ""
 
     script_content = f"""{header_with_array}
 
@@ -387,8 +377,8 @@ OUTER_DESCS=(
 {descs_array_block}
 )
 
-TARGET_FILES=(
-{files_array_block}
+INNER_ARGS_SETS=(
+{inner_sets_array_block}
 )
 
 # Safe task ID resolution (defaults to 0 if executed manually outside SLURM)
@@ -405,16 +395,15 @@ echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
-echo "Inner Loop Source File: $target_inner_file"
 echo "Inner Args: {arg_names_display}"
 echo "======================================================================"
 
 line_no=0
-while read -r line || [ -n "$line" ]; do
-    [[ -z "$line" || "$line" == "{comment_prefix}"* ]] && continue
-    ((line_no++))
+while IFS= read -r inner_args_str || [ -n "$inner_args_str" ]; do
+    [[ -z "$inner_args_str" ]] && continue
+    ((++line_no))
 
-    combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $line" | md5sum | cut -d ' ' -f 1)
+    combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $inner_args_str" | md5sum | cut -d ' ' -f 1)
     indicator="A${{TASK_ID}}_L${{line_no}}"
     indicator_checkpoint="A${{TASK_ID}}_L${{line_no}}_${{combo_hash}}"
 
@@ -425,9 +414,6 @@ while read -r line || [ -n "$line" ]; do
         continue
     fi
 
-    {ifs_setting}read -r -a inner_vals <<< "$line"
-    inner_args_str=""
-{arg_mapping}
 {ctx['exp_args_block']}
 
     print_args "$indicator" "{ctx['fixed_args_str']} $outer_args_str $inner_args_str $exp_args"
@@ -452,7 +438,7 @@ while read -r line || [ -n "$line" ]; do
         printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
     }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
-done < "$target_inner_file"
+done <<< "$inner_args_raw"
 
 wait
 """
