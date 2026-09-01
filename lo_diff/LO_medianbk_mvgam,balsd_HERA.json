@@ -1,0 +1,44 @@
+{
+  "slurm": {
+    "account": "lappi",
+    "job-name": "dip_HERA",
+    "partition": "test",
+    "nodes": 1,
+    "ntasks": 1,
+    "time": "00:06:00",
+    "cpus-per-task": 32,
+    "mem": "10G",
+    "output": "slurm_%j.log"
+  },
+  "execution": {
+    "multithreading_level": 1,
+    "interpreter": "julia",
+    "executable": "/projappl/lappi/abhiram/LO_Diffraction/sf_lo_T.jl",
+    "modules": [
+      "openmpi",
+      "julia/1.11.9",
+      "julia-mpi"
+    ],
+    "env_vars": {
+      "JULIA_NUM_THREADS": "$MULTITHREADING_LEVEL"
+    }
+  },
+  "experiment": {
+    "result_database_path": "/scratch/lappi/abhiram/LO_database",
+    "experiment_name": "MVe_rep0_parallel_inner_loop",
+    "slrm_output_dir": "SLURM_OUTPUT",
+    "tracking_args": {
+         "save_dir": "{save_dir}_{__indicator}",
+         "json": "{save_dir}_{__indicator}/result.json"
+    }
+  },
+  "inner_loop": {
+    "file_path": "/projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt",
+    "delimiter": " ",
+    "arg_names": ["--Q", "beta", "--x"]
+  },
+  "args": {
+    "dipole_path": "/projappl/lappi/abhiram/bayesian_alldata/LO_MVe/bks/0.dat",
+    "xmax": 160.0
+  }
+}
