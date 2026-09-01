@@ -7,12 +7,12 @@
     "ntasks": 1,
     "time": "1-12:59:00",
     "cpus-per-task": 16,
-    "mem": "20G",
+    "mem": "40G",
     "output": "slurm_%j.log"
   },
   "execution": {
     "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_nlo_sdaw_dip_T.jl",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_nlo_sdaw_dip_L.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
@@ -51,7 +51,7 @@
         },
         {
           "arg_name": "Csq",
-          "column": 2,
+          "column": 3,
           "transform": "10^x"
         }
       ]

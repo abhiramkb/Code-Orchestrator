@@ -28,9 +28,9 @@ inner_loop:
   file_path: /projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt
   delimiter: " "
   arg_names:
-    - Q
+    - "--Q"
     - beta
-    - x
+    - "--x"
 
 outer_loops:
   - type: tabular_file
@@ -43,7 +43,7 @@ outer_loops:
         column: 0
         template: "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/bks/{val}.dat"
       - arg_name: Csq
-        column: 2
+        column: 3
         transform: "10^x"
 
 args:

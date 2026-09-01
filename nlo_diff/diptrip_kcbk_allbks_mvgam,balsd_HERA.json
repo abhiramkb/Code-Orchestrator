@@ -1,30 +1,26 @@
 {
   "slurm": {
     "account": "lappi",
-    "job-name": "dipLO_HERA",
-    "partition": "small",
+    "job-name": "diptrip_HERA",
+    "partition": "gpumedium",
     "nodes": 1,
     "ntasks": 1,
     "time": "23:59:00",
-    "cpus-per-task": 1,
-    "mem": "10G",
+    "cpus-per-task": 72,
+    "gres": "gpu:gh200:1",
     "output": "slurm_%j.log"
   },
   "execution": {
-    "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dipLO/sf_lo_sdaw_dip_T.jl",
+    "interpreter": "python",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-trip/kcbk_codes/sf_nlo_sdaw_diptrip_T.py",
     "modules": [
-      "openmpi",
-      "julia/1.11.9",
-      "julia-mpi"
+      "python-tensorflow"
     ],
-    "env_vars": {
-      "JULIA_NUM_THREADS": "$SLURM_CPUS_PER_TASK"
-    }
+    "env_vars": {}
   },
   "experiment": {
-    "result_database_path": "/scratch/lappi/abhiram/dipLO_database",
-    "experiment_name": "allbks_mvgam_balsd",
+    "result_database_path": "/scratch/lappi/abhiram/diptrip_database",
+    "experiment_name": "kcbk_allbks_mvgam_balsd",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
          "save_dir": "{save_dir}_{__indicator}",
@@ -39,7 +35,7 @@
   "outer_loops": [
     {
       "type": "tabular_file",
-      "file_path": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/posteriorsamples.dat",
+      "file_path": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_Balsd_MVgamma/posteriorsamples.dat",
       "delimiter": ",",
       "comment_prefix": "#",
       "skip_blank_lines": true,
@@ -47,12 +43,17 @@
         {
           "arg_name": "dipole_path",
           "column": 0,
-          "template": "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/bks/{val}.dat"
+          "template": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_Balsd_MVgamma/bks/{val}.dat"
+        },
+        {
+          "arg_name": "Csq",
+          "column": 3
         }
       ]
     }
   ],
   "args": {
-    "xmax": 160.0
+    "xmax": 160.0,
+    "neval": 4e8
   }
 }
