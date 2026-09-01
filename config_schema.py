@@ -88,7 +88,7 @@ class ExecutionConfig(BaseModel):
     flags: Optional[List[str]] = Field(default_factory=list)
     executable: str
     modules: List[str] = Field(default_factory=list)
-    env_vars: Dict[str, str] = Field(default_factory=dict)
+    env_vars: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SlurmConfig(BaseModel):
