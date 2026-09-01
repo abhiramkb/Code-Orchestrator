@@ -25,7 +25,7 @@
   },
   "experiment": {
     "result_database_path": "/scratch/lappi/abhiram/strong_scaling_tests",
-    "experiment_name": "dip",
+    "experiment_name": "dip_pinned",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
          "save_dir": "{save_dir}_{__indicator}",
