@@ -19,7 +19,7 @@
     "env_vars": {}
   },
   "experiment": {
-    "result_database_path": "/projappl/lappi/abhiram/trip_database",
+    "result_database_path": "/scratch/lappi/abhiram/trip_database",
     "experiment_name": "median_mvgam_balsd",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {

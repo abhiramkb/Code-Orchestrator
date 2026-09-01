@@ -23,7 +23,7 @@
     }
   },
   "experiment": {
-    "result_database_path": "/projappl/lappi/abhiram/dip_database",
+    "result_database_path": "/scratch/lappi/abhiram/dip_database",
     "experiment_name": "median_mvgam_balsd",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {

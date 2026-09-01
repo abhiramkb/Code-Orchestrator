@@ -47,8 +47,8 @@
         },
         {
           "arg_name": "Csq",
-          "column": 2,
-	  "transform": "10^x"
+          "column": 3,
+	        "transform": "10^x"
         }
       ]
     }

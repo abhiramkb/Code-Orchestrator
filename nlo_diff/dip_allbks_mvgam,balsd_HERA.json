@@ -7,7 +7,7 @@
     "ntasks": 1,
     "time": "1-12:59:00",
     "cpus-per-task": 16,
-    "mem": "20G",
+    "mem": "40G",
     "output": "slurm_%j.log"
   },
   "execution": {
@@ -51,7 +51,7 @@
         },
         {
           "arg_name": "Csq",
-          "column": 2,
+          "column": 3,
           "transform": "10^x"
         }
       ]

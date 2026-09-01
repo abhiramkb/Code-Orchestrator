@@ -43,7 +43,7 @@ outer_loops:
         column: 0
         template: "/projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/bks/{val}.dat"
       - arg_name: Csq
-        column: 2
+        column: 3
         transform: "10^x"
 
 args:
