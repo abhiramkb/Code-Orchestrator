@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
-from pydantic import BaseModel, Field, ValidationError, ValidationInfo, computed_field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, computed_field, field_validator, model_validator
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
@@ -84,7 +84,11 @@ OuterLoopBlock = Annotated[
 # --- 2. Sub-Section Models ---
 
 class ExecutionConfig(BaseModel):
-    interpreter: Optional[str] = Field(default=None)
+    # 'language' is the legacy spelling of 'interpreter'. Both are accepted; an explicit
+    # 'interpreter' wins if a config carries both.
+    interpreter: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("interpreter", "language")
+    )
     flags: Optional[List[str]] = Field(default_factory=list)
     executable: str
     modules: List[str] = Field(default_factory=list)
@@ -192,6 +196,26 @@ class AppConfig(BaseModel):
             if isinstance(inner_loop, dict) and "type" not in inner_loop:
                 # Modifying a shallow copy or in-place to set default discriminator tag
                 data["inner_loop"]["type"] = "tabular_file"
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_inner_files(cls, data: Any) -> Any:
+        """Rejects the withdrawn per-outer-value 'inner_files' mapping.
+
+        Inner loops are now evaluated once in Python and shared across every outer
+        combination, so a per-value file mapping cannot be honoured. Unknown keys are
+        otherwise ignored, so without this the run would silently use the wrong
+        parameter set instead of failing.
+        """
+        if isinstance(data, dict):
+            for idx, block in enumerate(data.get("outer_loops") or []):
+                if isinstance(block, dict) and "inner_files" in block:
+                    raise ValueError(
+                        f"outer_loops[{idx}] uses 'inner_files', which is no longer supported. "
+                        "Inner loop values are shared across all outer combinations; use a "
+                        "separate config per inner file if they need to differ."
+                    )
         return data
 
     @property

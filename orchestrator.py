@@ -13,7 +13,7 @@ import sqlite3
 from typing import Any, Dict, Optional, List, Set, Tuple
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularOuterLoop
+from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularInnerLoop, TabularOuterLoop
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -346,8 +346,13 @@ def extract_config_flags(config: AppConfig) -> Tuple[Set[str], Set[str]]:
         raw_keys.update(config.args.keys())
 
     # 2. Inner loop argument names
-    if config.inner_loop:
-        raw_keys.update(config.inner_loop.arg_names)
+    inner_cfg = config.inner_loop
+    if inner_cfg is not None:
+        if isinstance(inner_cfg, TabularInnerLoop):
+            # arg_name_list is populated from either 'args' or the 'arg_names' shorthand
+            raw_keys.update(inner_cfg.arg_name_list)
+        elif getattr(inner_cfg, "arg_name", None):
+            raw_keys.add(inner_cfg.arg_name)
 
     # 3. Outer loop argument names
     for block in config.outer_loops:
