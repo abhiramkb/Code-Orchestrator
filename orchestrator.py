@@ -201,6 +201,12 @@ def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_b
         if env_vars else "# No environment variables specified"
     )
 
+    preamble = exec_cfg.preamble
+    preamble_block = (
+        "\n# User-Supplied Preamble\n" + preamble
+        if preamble else "# No preamble specified"
+    )
+
     print_args_def = """
 # Function to parse and display command-line arguments to SLURM output
 print_args() {
@@ -241,6 +247,7 @@ print_args() {
 {exp_env_block}
 {module_load_block}
 {env_var_block}
+{preamble_block}
 {print_args_def}"""
 
 

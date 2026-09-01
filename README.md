@@ -78,6 +78,7 @@ In job array mode the outer combinations form the SLURM array (one task per Cart
 | `flags` | Array | `[]` | Interpreter flags placed before the executable, e.g. `["-u"]`. |
 | `modules` | Array | `[]` | `module load` calls emitted before execution. |
 | `env_vars` | Object | `{}` | Exported before execution. Values may reference SLURM variables, e.g. `"$SLURM_CPUS_PER_TASK"`. |
+| `preamble` | String | `null` | Arbitrary, free-form Bash pasted verbatim into the script, after modules/env vars and before execution — e.g. `source`-ing a setup script or building a more complex environment than `modules`/`env_vars` can express. In YAML, use a block scalar (`preamble: \|`) for multi-line content. |
 
 ### `slurm`
 
