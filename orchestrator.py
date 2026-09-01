@@ -13,7 +13,10 @@ import sqlite3
 from typing import Any, Dict, Optional, List, Set, Tuple
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularInnerLoop, TabularOuterLoop
+from config_schema import (
+    validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig,
+    TabularInnerLoop, TabularOuterLoop, get_slurm_cpus_per_task, parse_slurm_mem_mb,
+)
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -195,6 +198,14 @@ def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_b
         if modules else "# No environment modules specified"
     )
 
+    # Exported before env_vars so a config can set e.g. JULIA_NUM_THREADS to
+    # "$MULTITHREADING_LEVEL" and get the per-run thread count.
+    level_block = (
+        f"\n# Cores used by one invocation of the executable\n"
+        f"export MULTITHREADING_LEVEL={exec_cfg.multithreading_level}"
+        if exec_cfg.multithreading_level is not None else ""
+    )
+
     env_vars = exec_cfg.env_vars
     env_var_block = (
         "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
@@ -246,9 +257,73 @@ print_args() {
 
 {exp_env_block}
 {module_load_block}
+{level_block}
 {env_var_block}
 {preamble_block}
 {print_args_def}"""
+
+
+def warn_about_concurrency(config: AppConfig) -> None:
+    """Flags configurations whose thread settings will oversubscribe the node.
+
+    Thread counts stay the user's responsibility (nothing is rewritten), but an
+    env var still pinned to $SLURM_CPUS_PER_TASK while the inner loop runs N ways
+    concurrently means N x the cores are requested, which is slower than running
+    sequentially. Warn rather than block.
+    """
+    level = config.execution.multithreading_level
+    if level is None:
+        return
+
+    offenders = [
+        k for k, v in config.execution.env_vars.items()
+        if "SLURM_CPUS_PER_TASK" in str(v)
+    ]
+    if offenders:
+        print(
+            f"[WARNING] {', '.join(offenders)} still reference(s) $SLURM_CPUS_PER_TASK while "
+            f"multithreading_level={level} is set.",
+            file=sys.stderr,
+        )
+        print(
+            "[WARNING] Each concurrent run would request the whole allocation. Set these to "
+            "$MULTITHREADING_LEVEL (exported by the generated script) or a literal value.",
+            file=sys.stderr,
+        )
+
+    cpus = get_slurm_cpus_per_task(config.slurm)
+    if cpus:
+        njobs = max(1, cpus // level)
+        mem_mb = parse_slurm_mem_mb((config.slurm.model_extra or {}).get("mem"))
+        detail = ""
+        if mem_mb and njobs > 1:
+            detail = f"; --mem is shared, leaving ~{mem_mb // njobs} MB per concurrent run"
+        print(f"[INFO] Inner loop will run up to {njobs} concurrent run(s){detail}.")
+
+
+def check_generated_script(script_content: str) -> None:
+    """Syntax-checks the generated bash and guards SLURM's script size limit."""
+    size = len(script_content.encode("utf-8"))
+    if size > 120_000:
+        print(
+            f"[ERROR] Generated script is {size} bytes; SLURM rejects scripts over 131072. "
+            "Reduce the parameter space or split the config.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            ["bash", "-n"], input=script_content, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[WARNING] Could not syntax-check the generated script: {e}", file=sys.stderr)
+        return
+
+    if result.returncode != 0:
+        print("[ERROR] Generated script failed 'bash -n' syntax check:", file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        sys.exit(1)
 
 
 def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp: str, backup_dir: Optional[Path] = None) -> Path:
@@ -258,6 +333,8 @@ def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp
 
     Also copies script file to backup directory if provided.
     """
+    check_generated_script(script_content)
+
     script_file = Path(f"submit_{mode_prefix}_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
     print(f"Generated {mode_prefix}-run SLURM script: {script_file}")
@@ -277,6 +354,7 @@ def generate_slurm_script(config_path, dryrunQ):
     # 1. Validate & convert raw dict to typed AppConfig object
     config: AppConfig = validate_config(cfg, config_path, dryrunQ)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
+    warn_about_concurrency(config)
 
     # 2. Extract execution metadata cleanly via dot-notation
     exec_cfg = config.execution

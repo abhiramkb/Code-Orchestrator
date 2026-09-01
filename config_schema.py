@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
@@ -94,6 +95,13 @@ class ExecutionConfig(BaseModel):
     modules: List[str] = Field(default_factory=list)
     env_vars: Dict[str, Any] = Field(default_factory=dict)
     preamble: Optional[str] = None
+    # Cores used by ONE invocation of the executable. When set, the inner loop runs
+    # floor(SLURM_CPUS_PER_TASK / multithreading_level) iterations concurrently.
+    # Omit it (the default) to keep the inner loop strictly sequential.
+    # ge=1 also guards the runtime division in the generated script.
+    multithreading_level: Optional[int] = Field(default=None, ge=1)
+    # Optional hard ceiling on concurrency, e.g. to stay within --mem.
+    max_parallel_tasks: Optional[int] = Field(default=None, ge=1)
 
 
 class SlurmConfig(BaseModel):
@@ -105,6 +113,38 @@ class SlurmConfig(BaseModel):
     max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
 
     model_config = {"extra": "allow", "populate_by_name": True}
+
+
+def get_slurm_cpus_per_task(slurm: SlurmConfig) -> Optional[int]:
+    """Reads 'cpus-per-task' from the SLURM block.
+
+    SlurmConfig allows arbitrary SBATCH keys, so anything not declared as a field
+    lands in model_extra under its literal JSON spelling. Returns None if unset.
+    """
+    extra = slurm.model_extra or {}
+    raw = extra.get("cpus-per-task", extra.get("cpus_per_task"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_slurm_mem_mb(value: Any) -> Optional[int]:
+    """Parses a SLURM memory value ('10G', '512M', '2048') into whole MB.
+
+    A bare number is MB, matching SLURM's own convention. Returns None if the
+    value cannot be interpreted.
+    """
+    if value is None:
+        return None
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT])?B?\s*", str(value), re.IGNORECASE)
+    if not match:
+        return None
+    scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024.0}
+    return int(float(match.group(1)) * scale[(match.group(2) or "M").upper()])
+
 
 class TabularInnerLoop(BaseModel):
     type: Literal["tabular_file"]
@@ -255,6 +295,21 @@ class AppConfig(BaseModel):
     def is_loop_mode(self) -> bool:
         """Helper property to check if loop mode is active."""
         return self.mode_info[0]
+
+    @model_validator(mode="after")
+    def validate_multithreading_level(self) -> "AppConfig":
+        """Checks that one run actually fits inside the requested allocation."""
+        level = self.execution.multithreading_level
+        if level is None:
+            return self
+
+        cpus = get_slurm_cpus_per_task(self.slurm)
+        if cpus is not None and level > cpus:
+            raise ValueError(
+                f"execution.multithreading_level ({level}) exceeds slurm 'cpus-per-task' "
+                f"({cpus}); a single run would not fit in the allocation."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_mode_integrity(self) -> "AppConfig":

@@ -79,6 +79,8 @@ In job array mode the outer combinations form the SLURM array (one task per Cart
 | `modules` | Array | `[]` | `module load` calls emitted before execution. |
 | `env_vars` | Object | `{}` | Exported before execution. Values may reference SLURM variables, e.g. `"$SLURM_CPUS_PER_TASK"`. |
 | `preamble` | String | `null` | Arbitrary, free-form Bash pasted verbatim into the script, after modules/env vars and before execution — e.g. `source`-ing a setup script or building a more complex environment than `modules`/`env_vars` can express. In YAML, use a block scalar (`preamble: \|`) for multi-line content. |
+| `multithreading_level` | Integer | `null` | Cores used by **one** invocation of the executable. When set, the inner loop runs `SLURM_CPUS_PER_TASK / multithreading_level` iterations concurrently. Omit for a strictly sequential inner loop. |
+| `max_parallel_tasks` | Integer | `null` | Hard ceiling on concurrent runs, regardless of how many cores are free — mainly to stay within `--mem`. |
 
 ### `slurm`
 
@@ -310,6 +312,34 @@ An explicit sweep works the same way and needs no data file:
   }
 }
 ```
+
+---
+
+## Parallel Inner Loop
+
+By default the inner loop runs one point at a time. Setting `execution.multithreading_level` to the number of cores a single invocation uses lets the orchestrator fill the rest of the allocation:
+
+```json
+"slurm": { "cpus-per-task": 16 },
+"execution": {
+  "multithreading_level": 4,
+  "env_vars": { "JULIA_NUM_THREADS": "$MULTITHREADING_LEVEL" }
+}
+```
+
+This runs `16 / 4 = 4` inner points at once. The count is computed at run time from `SLURM_CPUS_PER_TASK`, so it adapts if the allocation changes; it falls back to `nproc`, is capped by `max_parallel_tasks`, and can never drop below 1. Applies to both inner-loop and job-array modes (in array mode it fills the cores *within* each array task).
+
+**Set your thread count yourself.** The orchestrator exports `MULTITHREADING_LEVEL` for configs to reference but never rewrites `env_vars`. Leaving a thread variable at `$SLURM_CPUS_PER_TASK` while running N ways concurrently requests N times the cores and is *slower* than running sequentially — the generator prints a warning if it spots this, but does not block.
+
+Each run is pinned to its own disjoint slice of the job's CPU mask via `taskset`, so per-process affinity settings such as `JULIA_EXCLUSIVE` bind within a slot instead of every run crowding onto the same cores.
+
+### Output and interruption
+
+Concurrent output stays readable: each run's output is buffered and then emitted as one **contiguous, untorn block**, preserving the usual `[<indicator>_out]` / `[<indicator>_err]` tagging in a single file. Only the parent shell writes to the log, so no locking is involved.
+
+Blocks appear in **completion order**, not `L1, L2, L3` order. This is deliberate — a finished run reaches the log as soon as it completes, so an interrupted job (walltime, `scancel`, crash) still contains every run that finished. Runs still in flight are flushed under a `[PARTIAL]` banner, and while a run is executing its live output can be tailed at `<slrm_output_dir>/.partial/<job_id>/<indicator>.log`.
+
+Checkpointing is unaffected: every concurrent run has a distinct indicator and marker file, and the hashes are identical to those the sequential path produces, so existing `checkpoints/` directories stay valid.
 
 ---
 

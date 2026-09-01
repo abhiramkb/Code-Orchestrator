@@ -22,6 +22,315 @@ from checkpoint_utils import (
     format_slurm_array_range,
 )
 
+# ---------------------------------------------------------------------------
+# Emitted bash templates.
+#
+# These are deliberately plain (non-f) raw strings, substituted via .replace()
+# on @@TOKEN@@ placeholders. Do NOT convert them to f-strings: the bash below is
+# dense with ${...} and $(( )) and every brace would need doubling, which fails
+# only at job start - long after the script has been queued.
+# ---------------------------------------------------------------------------
+
+RUN_INNER_TASK_TMPL = r'''
+# =========================================================================
+# INNER TASK RUNNER
+# Runs one inner-loop point: checkpoint marker, execution, timing.
+#
+# NOTE: the { ... } > >(sed ...) block and its trailing `wait` MUST stay inside
+# this function body. At script top level that exact construct hangs forever
+# (verified on bash 5.1), and without the `wait` the sed output is silently lost.
+# =========================================================================
+run_inner_task() {
+    local line_no="$1"
+    local inner_args_str="$2"
+    local outer_args_str="$3"
+    local cpu_list="$4"
+    local CHECKPOINT_FILE="$5"
+    local indicator="@@INDICATOR_PREFIX@@L${line_no}"
+    local EXIT_CODE=0
+    local exp_args starttime endtime elapsedtime sec msec
+
+    # Confine this run (and every child it spawns) to its own slice of the
+    # allocation, so concurrent runs do not all pin onto the same cores.
+    if [ -n "$cpu_list" ] && command -v taskset >/dev/null 2>&1; then
+        taskset -cp "$cpu_list" $BASHPID >/dev/null 2>&1 || \
+            echo "[WARN] taskset failed for $indicator" >&2
+    fi
+@@EXP_ARGS_BLOCK@@
+    print_args "$indicator" "@@FIXED_ARGS@@ $outer_args_str $inner_args_str $exp_args"
+
+    {
+        starttime=$(date +%s%N)
+        echo "Job started at: $(date)"
+@@CONCURRENCY_INFO@@
+        eval "@@EXEC_CMD@@ $exp_args"
+        EXIT_CODE=$?
+
+        endtime=$(date +%s%N)
+        echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
+
+        if [ $EXIT_CODE -eq 0 ]; then
+            touch "$CHECKPOINT_FILE"
+        fi
+
+        elapsedtime=$((endtime - starttime))
+        sec=$(( elapsedtime / 1000000000 ))
+        msec=$(( (elapsedtime % 1000000000) / 1000000 ))
+        printf "Job duration: %d.%03d seconds\n" "$sec" "$msec"
+        echo ""
+    } > >(sed -u "s/^/[${indicator}_out] /") 2> >(sed -u "s/^/[${indicator}_err] /" >&2)
+
+    # MANDATORY: flushes both sed process substitutions before returning.
+    wait
+    return "$EXIT_CODE"
+}
+'''
+
+# Sequential driver - emitted when no multithreading_level is configured.
+SEQUENTIAL_LOOP_TMPL = r'''
+for idx in "${!INNER_ARGS[@]}"; do
+    inner_args_str="${INNER_ARGS[$idx]}"
+    line_no="${INNER_LINE_NOS[$idx]}"
+    line_hash=$(printf '%s' "$EXEC_SIG${outer_args_str:+ $outer_args_str} $inner_args_str" | md5sum | cut -d ' ' -f 1)
+    indicator="@@INDICATOR_PREFIX@@L${line_no}"
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${indicator}_${line_hash}.done"
+
+    # Runtime guard: protects a re-submitted or SLURM-requeued script
+    if [ -f "$CHECKPOINT_FILE" ]; then
+        echo "[CHECKPOINT] Skipping $indicator - already completed."
+        echo "[CHECKPOINT] Hash: ${line_hash}"
+        continue
+    fi
+
+    run_inner_task "$line_no" "$inner_args_str" "$outer_args_str" "" "$CHECKPOINT_FILE"
+done
+
+wait
+'''
+
+# Concurrency runtime - emitted only when multithreading_level is configured.
+PARALLEL_RUNTIME_TMPL = r'''
+# =========================================================================
+# INNER-LOOP CONCURRENCY RUNTIME
+# =========================================================================
+MULTITHREADING_LEVEL=@@MULTITHREADING_LEVEL@@
+MAX_PARALLEL=@@MAX_PARALLEL@@
+export MULTITHREADING_LEVEL
+
+# The :-$(nproc) fallback is required: an unset SLURM_CPUS_PER_TASK would make
+# bash arithmetic yield NJOBS=0 and the dispatcher would never launch anything.
+NCPU=${SLURM_CPUS_PER_TASK:-$(nproc)}
+NJOBS=$(( NCPU / MULTITHREADING_LEVEL ))
+if [ "$NJOBS" -gt "$MAX_PARALLEL" ]; then NJOBS=$MAX_PARALLEL; fi
+if [ "$NJOBS" -lt 1 ]; then NJOBS=1; fi
+
+# Per-run output is buffered here, then emitted as one contiguous block.
+# Uses SLURM_JOB_ID (unique per array element), never JOB_ID, which in array
+# mode is SLURM_ARRAY_JOB_ID and therefore shared by every task in the array.
+LOG_BUF_DIR="${SLRM_OUTPUT_DIR:-$PWD}/.partial/${SLURM_JOB_ID:-$$}"
+if [ "$NJOBS" -gt 1 ]; then mkdir -p "$LOG_BUF_DIR"; fi
+
+echo "Inner-loop concurrency: $NJOBS concurrent run(s) x $MULTITHREADING_LEVEL thread(s) of $NCPU CPUs"
+
+# Emit one run's buffered output as a single contiguous block. Only the parent
+# shell ever calls this, so single-writer gives atomicity with no locking.
+_dump_buffer() {
+    local b="$1"
+    [ -f "$b" ] || return 0
+    if [ -s "$b" ]; then
+        cat "$b"
+        # Guarantee a trailing newline, so the next block's [..._out] prefix can
+        # never concatenate onto an unterminated final line.
+        if [ "$(tail -c 1 "$b" | wc -l)" -eq 0 ]; then echo; fi
+    fi
+    rm -f "$b"
+    return 0
+}
+
+# Completed runs are already in the log; this only recovers output from runs
+# still in flight when the job is interrupted (e.g. walltime).
+_FLUSHED=0
+_flush_partial() {
+    [ "$_FLUSHED" -eq 1 ] && return 0
+    _FLUSHED=1
+    [ -d "$LOG_BUF_DIR" ] || return 0
+    local b
+    for b in "$LOG_BUF_DIR"/*.log; do
+        [ -e "$b" ] || continue
+        echo "[PARTIAL] ---- incomplete output for $(basename "$b" .log) (job interrupted) ----"
+        cat "$b"
+        rm -f "$b"
+    done
+    rmdir "$LOG_BUF_DIR" 2>/dev/null
+    # Also drop the shared .partial parent, but only once it is empty.
+    rmdir "$(dirname "$LOG_BUF_DIR")" 2>/dev/null
+    return 0
+}
+# _FLUSHED makes this idempotent: `exit` in the TERM handler re-triggers EXIT.
+trap '_flush_partial' EXIT
+trap 'echo "[SIGNAL] SIGTERM received (walltime?); flushing partial logs."; _flush_partial; exit 143' TERM
+
+# Slice this job's own affinity mask into disjoint per-slot CPU lists.
+_ALL_CPUS=()
+if [ "$NJOBS" -gt 1 ] && command -v taskset >/dev/null 2>&1; then
+    _mask=$(taskset -cp $$ 2>/dev/null | sed 's/.*: //')
+    IFS=',' read -ra _parts <<< "$_mask"
+    for _r in "${_parts[@]}"; do
+        case "$_r" in
+            *-*) for _c in $(seq "${_r%-*}" "${_r#*-}"); do _ALL_CPUS+=("$_c"); done ;;
+            "")  ;;
+            *)   _ALL_CPUS+=("$_r") ;;
+        esac
+    done
+fi
+
+_slot_cpus() {
+    local start=$(( $1 * MULTITHREADING_LEVEL ))
+    if [ "${#_ALL_CPUS[@]}" -lt "$(( start + MULTITHREADING_LEVEL ))" ]; then
+        echo ""
+        return 0
+    fi
+    local IFS=','
+    echo "${_ALL_CPUS[*]:$start:$MULTITHREADING_LEVEL}"
+}
+
+declare -A PID_BUF PID_SLOT
+_running=0
+_ok=0
+_failed=0
+_skipped=0
+_SLOT_FREE=()
+for (( _s = NJOBS - 1; _s >= 0; _s-- )); do _SLOT_FREE+=("$_s"); done
+
+# Reap exactly one finished run, emit its output, and release its slot.
+_reap_one() {
+    local fp rc buf slot
+    wait -n -p fp
+    rc=$?
+    # A trapped signal wakes wait -n with no child reaped; leave the map alone.
+    if [ -z "${fp:-}" ]; then return 1; fi
+    buf="${PID_BUF[$fp]}"
+    slot="${PID_SLOT[$fp]}"
+    unset "PID_BUF[$fp]" "PID_SLOT[$fp]"
+    _dump_buffer "$buf"
+    _SLOT_FREE+=("$slot")
+    _running=$(( _running - 1 ))
+    if [ "$rc" -eq 0 ]; then _ok=$(( _ok + 1 )); else _failed=$(( _failed + 1 )); fi
+    return 0
+}
+'''
+
+# Concurrent driver - emitted only when multithreading_level is configured.
+PARALLEL_LOOP_TMPL = r'''
+for idx in "${!INNER_ARGS[@]}"; do
+    inner_args_str="${INNER_ARGS[$idx]}"
+    line_no="${INNER_LINE_NOS[$idx]}"
+    line_hash=$(printf '%s' "$EXEC_SIG${outer_args_str:+ $outer_args_str} $inner_args_str" | md5sum | cut -d ' ' -f 1)
+    indicator="@@INDICATOR_PREFIX@@L${line_no}"
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${indicator}_${line_hash}.done"
+
+    # Runtime guard: protects a re-submitted or SLURM-requeued script. Checked
+    # before dispatch so an already-completed point never occupies a slot.
+    if [ -f "$CHECKPOINT_FILE" ]; then
+        echo "[CHECKPOINT] Skipping $indicator - already completed."
+        echo "[CHECKPOINT] Hash: ${line_hash}"
+        _skipped=$(( _skipped + 1 ))
+        continue
+    fi
+
+    # Degenerate case: stream straight to the log, exactly as the sequential path.
+    if [ "$NJOBS" -le 1 ]; then
+        run_inner_task "$line_no" "$inner_args_str" "$outer_args_str" "" "$CHECKPOINT_FILE"
+        if [ $? -eq 0 ]; then _ok=$(( _ok + 1 )); else _failed=$(( _failed + 1 )); fi
+        continue
+    fi
+
+    while [ "$_running" -ge "$NJOBS" ]; do
+        _reap_one || break
+    done
+
+    _slot="${_SLOT_FREE[-1]}"
+    unset '_SLOT_FREE[-1]'
+    _buf="$LOG_BUF_DIR/${indicator}.log"
+    : > "$_buf"
+    run_inner_task "$line_no" "$inner_args_str" "$outer_args_str" "$(_slot_cpus "$_slot")" "$CHECKPOINT_FILE" >> "$_buf" 2>&1 &
+    PID_BUF[$!]="$_buf"
+    PID_SLOT[$!]="$_slot"
+    _running=$(( _running + 1 ))
+done
+
+while [ "$_running" -gt 0 ]; do
+    _reap_one || break
+done
+
+echo "[SUMMARY] completed=$_ok skipped=$_skipped failed=$_failed"
+wait
+'''
+
+
+def build_inner_driver(
+    ctx: Dict[str, Any],
+    config: AppConfig,
+    indicator_prefix: str = "",
+) -> str:
+    """Builds the shared run_inner_task function plus the loop that drives it.
+
+    Emits the sequential driver unless execution.multithreading_level is set, in
+    which case the concurrency runtime and dispatcher are emitted instead. Both
+    drivers call the same run_inner_task, so the checkpoint/exec/timing logic
+    exists in exactly one place and is identical across modes.
+    """
+    exec_cfg = config.execution
+    level = exec_cfg.multithreading_level
+
+    exec_cmd = build_exec_command(
+        exec_cfg,
+        ctx["flags_str"],
+        ctx["fixed_args_str"],
+        "$outer_args_str $inner_args_str",
+    )
+
+    concurrency_info = ""
+    if level is not None:
+        # Wall-clock duration inflates under contention, so record the conditions
+        # it was measured under alongside it.
+        concurrency_info = (
+            '        printf "Concurrency: %d\\n" "$NJOBS"\n'
+            '        printf "Threads: %d\\n" "$MULTITHREADING_LEVEL"'
+        )
+
+    task_fn = (
+        RUN_INNER_TASK_TMPL
+        .replace("@@INDICATOR_PREFIX@@", indicator_prefix)
+        .replace("@@EXP_ARGS_BLOCK@@", ctx["exp_args_block"])
+        .replace("@@FIXED_ARGS@@", ctx["fixed_args_str"])
+        .replace("@@CONCURRENCY_INFO@@", concurrency_info)
+        .replace("@@EXEC_CMD@@", exec_cmd)
+    )
+
+    if level is None:
+        driver = SEQUENTIAL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
+        return task_fn + driver
+
+    runtime = (
+        PARALLEL_RUNTIME_TMPL
+        .replace("@@MULTITHREADING_LEVEL@@", str(level))
+        .replace("@@MAX_PARALLEL@@", str(compute_max_parallel(config)))
+    )
+    driver = PARALLEL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
+    return task_fn + runtime + driver
+
+
+def compute_max_parallel(config: AppConfig) -> int:
+    """Explicit ceiling on concurrent runs, or an effectively unlimited default.
+
+    The CPU-derived limit is applied at runtime from SLURM_CPUS_PER_TASK; this is
+    only the part that can be known at generation time.
+    """
+    cap = config.execution.max_parallel_tasks
+    return cap if cap is not None else 9999
+
+
 def build_exec_command(
     exec_cfg: ExecutionConfig,
     flags_str: str,
@@ -175,9 +484,7 @@ def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> Optional[st
     arg_names = list(evaluated_inner[0].keys()) if evaluated_inner else []
     arg_names_display = ", ".join(arg_names)
 
-    exec_cmd = build_exec_command(
-        ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], "$inner_args_str"
-    )
+    inner_driver = build_inner_driver(ctx, config, indicator_prefix="")
 
     return f"""{ctx['common_header']}
 
@@ -185,6 +492,9 @@ def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> Optional[st
 cd "{ctx['exec_dir']}" || exit 1
 
 EXEC_SIG="{ctx['exec_sig_str']}"
+
+# No outer loop in this mode; the shared inner driver expects the variable.
+outer_args_str=""
 
 INNER_ARGS=(
 {args_array_block}
@@ -204,49 +514,7 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Args: {arg_names_display}"
 echo "Pending Tasks: {len(pending_tasks)} / {len(evaluated_inner)}"
 echo "================================================================"
-
-for idx in "${{!INNER_ARGS[@]}}"; do
-    inner_args_str="${{INNER_ARGS[$idx]}}"
-    line_no="${{INNER_LINE_NOS[$idx]}}"
-    line_hash=$(printf '%s' "$EXEC_SIG $inner_args_str" | md5sum | cut -d ' ' -f 1)
-    indicator="L${{line_no}}"
-    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{line_hash}}.done"
-
-    # Runtime guard: protects a re-submitted or SLURM-requeued script
-    if [ -f "$CHECKPOINT_FILE" ]; then
-        echo "[CHECKPOINT] Skipping $indicator - already completed."
-        echo "[CHECKPOINT] Hash: ${{line_hash}}"
-        continue
-    fi
-
-{ctx['exp_args_block']}
-    print_args "$indicator" "{ctx['fixed_args_str']} $inner_args_str $exp_args"
-
-    {{
-        starttime=$(date +%s%N)
-        echo "Job started at: $(date)"
-        
-        eval "{exec_cmd} $exp_args"
-        EXIT_CODE=$?
-        
-        endtime=$(date +%s%N)
-        echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
-
-        if [ $EXIT_CODE -eq 0 ]; then
-          touch "$CHECKPOINT_FILE"
-        fi
-        
-        elapsedtime=$((endtime - starttime))
-        sec=$(( elapsedtime / 1000000000 ))
-        msec=$(( (elapsedtime % 1000000000) / 1000000 ))
-        printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
-        echo ""
-    }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
-
-done
-
-wait
-"""
+{inner_driver}"""
 
 def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
     """Evaluates a typed outer loop block into argument dictionaries."""
@@ -363,12 +631,11 @@ def build_job_array_mode(
     inner_args_array_block = "\n".join(bash_inner_args)
     arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
 
-    exec_cmd = build_exec_command(
-        ctx["exec_cfg"],
-        ctx["flags_str"],
-        ctx["fixed_args_str"],
-        "$outer_args_str $inner_args_str",
-    )
+    # The inner loop is not pre-filtered in this mode (outer tasks are), so the
+    # driver's runtime checkpoint check is what skips completed points here.
+    inner_line_nos_block = "\n".join(f"    {i}" for i in range(1, len(evaluated_inner) + 1))
+
+    inner_driver = build_inner_driver(ctx, config, indicator_prefix="A${TASK_ID}_")
 
     script_content = f"""{header_with_array}
 
@@ -390,6 +657,11 @@ INNER_ARGS=(
 {inner_args_array_block}
 )
 
+# 1-based inner line numbers, matching the indicators used for checkpoint names
+INNER_LINE_NOS=(
+{inner_line_nos_block}
+)
+
 TASK_ID=${{SLURM_ARRAY_TASK_ID:-0}}
 outer_args_str="${{OUTER_ARGS[$TASK_ID]}}"
 outer_desc="${{OUTER_DESCS[$TASK_ID]}}"
@@ -404,44 +676,5 @@ echo "Outer Flags: $outer_args_str"
 echo "Inner Args: {arg_names_display}"
 echo "Executing Subtasks: {len(pending_task_ids)} / {len(outer_combinations)} Outer Runs"
 echo "======================================================================"
-
-line_no=0
-for inner_args_str in "${{INNER_ARGS[@]}}"; do
-    ((++line_no))
-    combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $inner_args_str" | md5sum | cut -d ' ' -f 1)
-    indicator="A${{TASK_ID}}_L${{line_no}}"
-    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{combo_hash}}.done"
-
-    if [ -f "$CHECKPOINT_FILE" ]; then
-        echo "[CHECKPOINT] Skipping $indicator - already completed."
-        continue
-    fi
-
-{ctx['exp_args_block']}
-    print_args "$indicator" "{ctx['fixed_args_str']} $outer_args_str $inner_args_str $exp_args"
-
-    {{
-        starttime=$(date +%s%N)
-        echo "Job started at: $(date)"
-        
-        eval "{exec_cmd} $exp_args"
-        EXIT_CODE=$?
-        
-        endtime=$(date +%s%N)
-        echo "Job finished at: $(date) with Exit Code: $EXIT_CODE"
-
-        if [ $EXIT_CODE -eq 0 ]; then
-            touch "$CHECKPOINT_FILE"
-        fi
-        
-        elapsedtime=$((endtime - starttime))
-        sec=$(( elapsedtime / 1000000000 ))
-        msec=$(( (elapsedtime % 1000000000) / 1000000 ))
-        printf "Job duration: %d.%03d seconds\\n" "$sec" "$msec"
-    }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
-
-done
-
-wait
-"""
+{inner_driver}"""
     return script_content, len(pending_task_ids)
