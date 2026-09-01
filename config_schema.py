@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
-from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, computed_field, field_validator, model_validator
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
@@ -163,6 +163,13 @@ class ExperimentConfig(BaseModel):
     experiment_name: str
     slrm_output_dir: str
     tracking_args: Optional[Dict[str, str]] = None
+
+    @computed_field
+    @property
+    def checkpoint_dir(self) -> str:
+        # Path() normalizes extra slashes automatically
+        full_path = Path(self.result_database_path) / self.experiment_name / "checkpoints"
+        return str(full_path)
 
 
 # --- 3. Root Application Schema ---

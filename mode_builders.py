@@ -15,6 +15,13 @@ from config_schema import (
     OuterLoopBlock
 )
 
+from checkpoint_utils import (
+    is_single_mode_completed,
+    filter_inner_loop_tasks,
+    get_pending_array_task_ids,
+    format_slurm_array_range,
+)
+
 def build_exec_command(
     exec_cfg: ExecutionConfig,
     flags_str: str,
@@ -33,8 +40,12 @@ def build_exec_command(
     return " ".join(p for p in cmd_parts if p)
 
 
-def build_single_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
-    """Mode 0: Non-looped execution script generator."""
+def build_single_mode(ctx: Dict[str, Any], config: AppConfig) -> Optional[str]:
+    """Mode 0: Non-looped execution generator with Python pre-checkpoint check."""
+    if is_single_mode_completed(ctx["checkpoint_dir"], ctx["exec_sig_str"]):
+        print("[PRE-CHECK] Single run configuration already completed. Skipping SLURM generation.")
+        return None
+
     exec_cmd = build_exec_command(
         ctx["exec_cfg"], ctx["flags_str"], ctx["fixed_args_str"], ""
     )
@@ -44,12 +55,11 @@ def build_single_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
 cd "{ctx['exec_dir']}" || exit 1
 
 indicator="SINGLE"
-
 EXEC_SIG="{ctx['exec_sig_str']}"
 exec_hash=$(printf '%s' "$EXEC_SIG" | md5sum | cut -d ' ' -f 1)
-
-# Checkpoint check
 CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{exec_hash}}.done"
+
+# Runtime guard: protects a re-submitted or SLURM-requeued script
 if [ -f "$CHECKPOINT_FILE" ]; then
     echo "[CHECKPOINT] Configuration previously completed. Exiting."
     exit 0
@@ -62,9 +72,7 @@ echo "Exec Path: {ctx['exec_path']}"
 echo "Flags: {ctx['fixed_args_str']}"
 echo "================================================================"
 
-indicator="SINGLE"
 {ctx['exp_args_block']}
-
 print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 
 {{
@@ -145,18 +153,25 @@ def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
 
     raise ValueError(f"Unsupported inner_loop type: '{type(loop)}'")
 
-def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> str:
-    """Mode 1: Inner-loop-only script generator."""
+def build_inner_loop_mode(ctx: Dict[str, Any], config: AppConfig) -> Optional[str]:
+    """Mode 1: Inner-loop-only generator pre-filtered in Python."""
     evaluated_inner = _evaluate_inner_loop(config.inner_loop)
+    pending_tasks = filter_inner_loop_tasks(
+        ctx["checkpoint_dir"], ctx["exec_sig_str"], evaluated_inner
+    )
 
+    if not pending_tasks:
+        print("[PRE-CHECK] All inner loop tasks completed. Skipping SLURM generation.")
+        return None
 
-    bash_inner_args = []
-    for item_dict in evaluated_inner:
+    bash_inner_args, bash_inner_line_nos = [], []
+    for line_no, item_dict in pending_tasks:
         args_str = format_cli_args(item_dict)
         bash_inner_args.append(f'    "{args_str}"')
+        bash_inner_line_nos.append(f"    {line_no}")
 
     args_array_block = "\n".join(bash_inner_args)
-
+    line_nos_array_block = "\n".join(bash_inner_line_nos)
     arg_names = list(evaluated_inner[0].keys()) if evaluated_inner else []
     arg_names_display = ", ".join(arg_names)
 
@@ -175,32 +190,36 @@ INNER_ARGS=(
 {args_array_block}
 )
 
+# Original 1-based indices from the full inner loop, preserved through
+# pre-filtering so checkpoint names and log indicators stay stable across runs
+INNER_LINE_NOS=(
+{line_nos_array_block}
+)
+
 echo "======================= SLURM RUN LEGEND ======================="
 echo "Mode: Inner Loop Only"
 echo "Working Directory: {ctx['exec_dir']}"
 echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Args: {arg_names_display}"
+echo "Pending Tasks: {len(pending_tasks)} / {len(evaluated_inner)}"
 echo "================================================================"
 
-line_no=0
-for inner_args_str in "${{INNER_ARGS[@]}}"; do
-    ((line_no++))
-
+for idx in "${{!INNER_ARGS[@]}}"; do
+    inner_args_str="${{INNER_ARGS[$idx]}}"
+    line_no="${{INNER_LINE_NOS[$idx]}}"
     line_hash=$(printf '%s' "$EXEC_SIG $inner_args_str" | md5sum | cut -d ' ' -f 1)
     indicator="L${{line_no}}"
-    indicator_checkpoint="L${{line_no}}_${{line_hash}}"
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{line_hash}}.done"
 
-    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
+    # Runtime guard: protects a re-submitted or SLURM-requeued script
     if [ -f "$CHECKPOINT_FILE" ]; then
         echo "[CHECKPOINT] Skipping $indicator - already completed."
         echo "[CHECKPOINT] Hash: ${{line_hash}}"
         continue
     fi
 
-
 {ctx['exp_args_block']}
-
     print_args "$indicator" "{ctx['fixed_args_str']} $inner_args_str $exp_args"
 
     {{
@@ -287,12 +306,13 @@ def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
 def build_job_array_mode(
     ctx: Dict[str, Any], config: AppConfig,
     max_concurrent: Optional[int] = None,
-) -> Tuple[str, int]:
-    """Mode 2: Outer + Inner loop SLURM Job Array script generator unrolled via Python."""
+) -> Tuple[Optional[str], int]:
+    """Mode 2: Outer + Inner loop SLURM Job Array using original explicit indices."""
+    checkpoint_dir = ctx["checkpoint_dir"]
     inner_cfg = config.inner_loop
     outer_cfg = config.outer_loops
 
-    # 1. Evaluate outer loop combinations
+    # 1. Generate all original outer combinations
     evaluated_blocks = [_evaluate_outer_block(block) for block in outer_cfg]
     outer_combinations = []
     for combo_tuple in itertools.product(*evaluated_blocks):
@@ -301,30 +321,29 @@ def build_job_array_mode(
             merged_combo.update(d)
         outer_combinations.append(merged_combo)
 
-    total_tasks = len(outer_combinations)
-
-    # 2. Evaluate shared inner loop arguments once
     evaluated_inner = _evaluate_inner_loop(inner_cfg)
-    bash_inner_args = []
-    all_inner_arg_names = set()
 
-    for item in evaluated_inner:
-        bash_inner_args.append(f'    "{format_cli_args(item)}"')
-        all_inner_arg_names.update(item.keys())
+    # 2. Identify incomplete task IDs based on original zero-indexed position
+    pending_task_ids = get_pending_array_task_ids(
+        checkpoint_dir, ctx["exec_sig_str"], outer_combinations, evaluated_inner
+    )
 
-    inner_args_array_block = "\n".join(bash_inner_args)
-    arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
+    if not pending_task_ids:
+        print("[PRE-CHECK] All job array tasks are complete. Skipping SLURM generation.")
+        return None, 0
 
-    # 3. Format SBATCH header with array bounds
-    array_range = f"0-{total_tasks - 1}"
-    if max_concurrent:
-        array_range += f"%{max_concurrent}"
+    # 3. Format SLURM array range with original task IDs (e.g., "0-2,5,8%4")
+    array_range_str = format_slurm_array_range(pending_task_ids, max_concurrent)
 
-    lines = ctx["common_header"].splitlines()
-    lines.insert(1, f"#SBATCH --array={array_range}")
+    # Strip existing #SBATCH --array directives and insert the calculated range after #!/bin/bash
+    lines = [
+        line for line in ctx["common_header"].splitlines() 
+        if not line.strip().startswith("#SBATCH --array")
+    ]
+    lines.insert(1, f"#SBATCH --array={array_range_str}")
     header_with_array = "\n".join(lines)
 
-    # 4. Build outer loop parameter Bash arrays
+    # 4. Build outer arrays containing ALL original combinations so index lookup aligns
     bash_outer_args, bash_outer_descs = [], []
     for combo_dict in outer_combinations:
         outer_args_str = format_cli_args(combo_dict)
@@ -334,6 +353,15 @@ def build_job_array_mode(
 
     outer_args_array_block = "\n".join(bash_outer_args)
     outer_descs_array_block = "\n".join(bash_outer_descs)
+
+    # 5. Build inner parameter array
+    bash_inner_args, all_inner_arg_names = [], set()
+    for item in evaluated_inner:
+        bash_inner_args.append(f'    "{format_cli_args(item)}"')
+        all_inner_arg_names.update(item.keys())
+
+    inner_args_array_block = "\n".join(bash_inner_args)
+    arg_names_display = ", ".join(sorted(all_inner_arg_names)) if all_inner_arg_names else ""
 
     exec_cmd = build_exec_command(
         ctx["exec_cfg"],
@@ -349,7 +377,7 @@ cd "{ctx['exec_dir']}" || exit 1
 
 EXEC_SIG="{ctx['exec_sig_str']}"
 
-# Outer loop parameter combinations mapped by SLURM Task ID
+# Complete outer loop array indexed by original task IDs
 OUTER_ARGS=(
 {outer_args_array_block}
 )
@@ -358,14 +386,11 @@ OUTER_DESCS=(
 {outer_descs_array_block}
 )
 
-# Shared inner loop parameter combinations
 INNER_ARGS=(
 {inner_args_array_block}
 )
 
-# Safe task ID resolution (defaults to 0 if executed manually outside SLURM)
 TASK_ID=${{SLURM_ARRAY_TASK_ID:-0}}
-
 outer_args_str="${{OUTER_ARGS[$TASK_ID]}}"
 outer_desc="${{OUTER_DESCS[$TASK_ID]}}"
 
@@ -377,25 +402,22 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Outer Loop Combo: $outer_desc"
 echo "Outer Flags: $outer_args_str"
 echo "Inner Args: {arg_names_display}"
+echo "Executing Subtasks: {len(pending_task_ids)} / {len(outer_combinations)} Outer Runs"
 echo "======================================================================"
 
 line_no=0
 for inner_args_str in "${{INNER_ARGS[@]}}"; do
     ((++line_no))
-
     combo_hash=$(printf '%s' "$EXEC_SIG $outer_args_str $inner_args_str" | md5sum | cut -d ' ' -f 1)
     indicator="A${{TASK_ID}}_L${{line_no}}"
-    indicator_checkpoint="A${{TASK_ID}}_L${{line_no}}_${{combo_hash}}"
+    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator}}_${{combo_hash}}.done"
 
-    CHECKPOINT_FILE="$CHECKPOINT_DIR/${{indicator_checkpoint}}.done"
     if [ -f "$CHECKPOINT_FILE" ]; then
         echo "[CHECKPOINT] Skipping $indicator - already completed."
-        echo "[CHECKPOINT] Hash: ${{combo_hash}}"
         continue
     fi
 
 {ctx['exp_args_block']}
-
     print_args "$indicator" "{ctx['fixed_args_str']} $outer_args_str $inner_args_str $exp_args"
 
     {{
@@ -422,4 +444,4 @@ done
 
 wait
 """
-    return script_content, total_tasks
+    return script_content, len(pending_task_ids)

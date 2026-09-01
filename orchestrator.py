@@ -66,7 +66,8 @@ def build_experiment_strings(experiment: Optional[ExperimentConfig], mode_index)
     """
     if experiment is None:
         exp_env_block = """
-export CHECKPOINT_DIR="./checkpoints"
+# Absolute so it still resolves after the script cd's to the executable directory
+export CHECKPOINT_DIR="$(pwd)/checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 """
         exp_args_block = '\n    exp_args=""'
@@ -290,8 +291,13 @@ def generate_slurm_script(config_path, dryrunQ):
     exec_sig_components = [exec_cfg.interpreter, flags_str, str(exec_path), fixed_args_str]
     exec_sig_str = " ".join(p for p in exec_sig_components if p)
 
+    checkpoint_dir = (
+        Path(experiment_cfg.checkpoint_dir) if experiment_cfg else Path("checkpoints").resolve()
+    )
+
     ctx = {
         "exec_cfg": exec_cfg,
+        "checkpoint_dir": checkpoint_dir,
         "exec_path": exec_path,
         "exec_dir": exec_dir,
         "flags_str": flags_str,
@@ -309,16 +315,22 @@ def generate_slurm_script(config_path, dryrunQ):
     if mode_index == 0:
         # Mode 0: Single Run
         script_content = build_single_mode(ctx, config)
+        if script_content is None:
+            return None
         return write_script(script_content, "single", exp_name, timestamp, backup_dir)
 
     elif mode_index == 1:
         # Mode 1: Inner Loop Only
         script_content = build_inner_loop_mode(ctx, config)
+        if script_content is None:
+            return None
         return write_script(script_content, "inner", exp_name, timestamp, backup_dir)
 
     else:
         # Mode 2: Array Mode (Outer + Inner Loops)
         script_content, total_tasks = build_job_array_mode(ctx, config, max_concurrent)
+        if script_content is None:
+            return None
         script_file = write_script(script_content, "array", exp_name, timestamp, backup_dir)
         print(f"({total_tasks} tasks)")
         return script_file
@@ -700,6 +712,10 @@ if __name__ == "__main__":
             continue
 
         generated_script = generate_slurm_script(config_path, args.dryrun)
+
+        if generated_script is None:
+            print(f"[INFO] Nothing to submit for {config_path}: all tasks already checkpointed.")
+            continue
 
         if args.dryrun:
             print(f"[INFO] Dry-run: not submitting to SLURM for {config_path}.")
