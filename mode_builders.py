@@ -1,5 +1,6 @@
 from pathlib import Path
 import itertools
+from textwrap import indent
 from typing import Any, Dict, List, Optional, Tuple
 from arg_transform import _apply_transform
 from utils import format_cli_args, strip_hyphens
@@ -86,6 +87,20 @@ run_inner_task() {
 }
 '''
 
+# Optional wrapper placed around an inner-loop body when one array element owns
+# several outer combinations. The indicator keys on $o_idx (the outer combination
+# index), never on the array task id - see build_job_array_mode.
+OUTER_WRAPPER_HEAD_TMPL = r'''
+for o_idx in "${MY_OUTER_IDS[@]}"; do
+    outer_args_str="${OUTER_ARGS[$o_idx]}"
+    outer_desc="${OUTER_DESCS[$o_idx]}"
+    echo "---------- outer combination $o_idx: $outer_desc ----------"
+'''
+
+OUTER_WRAPPER_TAIL_TMPL = r'''
+done
+'''
+
 # Sequential driver - emitted when no multithreading_level is configured.
 SEQUENTIAL_LOOP_TMPL = r'''
 for idx in "${!INNER_ARGS[@]}"; do
@@ -104,7 +119,12 @@ for idx in "${!INNER_ARGS[@]}"; do
 
     run_inner_task "$line_no" "$inner_args_str" "$outer_args_str" "" "$CHECKPOINT_FILE"
 done
+'''
 
+# Drain for the sequential driver. Kept separate from the loop body so that, when
+# an array element owns several outer combinations, it runs once at the very end
+# rather than at every combination boundary.
+SEQUENTIAL_TAIL_TMPL = r'''
 wait
 '''
 
@@ -258,7 +278,12 @@ for idx in "${!INNER_ARGS[@]}"; do
     PID_SLOT[$!]="$_slot"
     _running=$(( _running + 1 ))
 done
+'''
 
+# Drain for the concurrent driver. Deliberately outside the outer-combination
+# wrapper: keeping one slot pool across boundaries lets the last runs of one
+# combination overlap the first runs of the next instead of idling cores.
+PARALLEL_TAIL_TMPL = r'''
 while [ "$_running" -gt 0 ]; do
     _reap_one || break
 done
@@ -272,6 +297,7 @@ def build_inner_driver(
     ctx: Dict[str, Any],
     config: AppConfig,
     indicator_prefix: str = "",
+    wrap_outer_loop: bool = False,
 ) -> str:
     """Builds the shared run_inner_task function plus the loop that drives it.
 
@@ -279,6 +305,11 @@ def build_inner_driver(
     which case the concurrency runtime and dispatcher are emitted instead. Both
     drivers call the same run_inner_task, so the checkpoint/exec/timing logic
     exists in exactly one place and is identical across modes.
+
+    With wrap_outer_loop the inner-loop body is nested inside a loop over
+    MY_OUTER_IDS, so one array element can process several outer combinations.
+    The drain stays outside that wrapper, which keeps the concurrency slot pool
+    saturated across combination boundaries.
     """
     exec_cfg = config.execution
     level = exec_cfg.multithreading_level
@@ -308,17 +339,57 @@ def build_inner_driver(
         .replace("@@EXEC_CMD@@", exec_cmd)
     )
 
+    def wrap(body: str) -> str:
+        """Nests one inner-loop body inside the outer-combination loop."""
+        if not wrap_outer_loop:
+            return body
+        return OUTER_WRAPPER_HEAD_TMPL + indent(body, "    ") + OUTER_WRAPPER_TAIL_TMPL
+
     if level is None:
-        driver = SEQUENTIAL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
-        return task_fn + driver
+        body = SEQUENTIAL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
+        return task_fn + wrap(body) + SEQUENTIAL_TAIL_TMPL
 
     runtime = (
         PARALLEL_RUNTIME_TMPL
         .replace("@@MULTITHREADING_LEVEL@@", str(level))
         .replace("@@MAX_PARALLEL@@", str(compute_max_parallel(config)))
     )
-    driver = PARALLEL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
-    return task_fn + runtime + driver
+    body = PARALLEL_LOOP_TMPL.replace("@@INDICATOR_PREFIX@@", indicator_prefix)
+    return task_fn + runtime + wrap(body) + PARALLEL_TAIL_TMPL
+
+
+def group_outer_tasks(
+    pending_ids: List[int], num_array_jobs: Optional[int]
+) -> List[Tuple[int, List[int]]]:
+    """Maps pending outer combinations onto SLURM array elements.
+
+    Returns (array_task_id, [outer combination indices]) pairs.
+
+    Without num_array_jobs each pending combination becomes its own array element
+    keyed by its *original* index, which reproduces the historical sparse
+    '--array=0-2,5,8' behaviour exactly.
+
+    With num_array_jobs the pending list - not the index space - is split into
+    that many near-equal groups, so a resumed run still fills every element with
+    real work. Group sizes differ by at most one, which also keeps the shared
+    '--time' over-request to at most one combination's worth.
+    """
+    if num_array_jobs is None:
+        return [(outer_id, [outer_id]) for outer_id in pending_ids]
+
+    # Clamp: more elements than pending work would submit empty array tasks.
+    groups = min(num_array_jobs, len(pending_ids))
+    if groups <= 0:
+        return []
+
+    base, remainder = divmod(len(pending_ids), groups)
+    assignments: List[Tuple[int, List[int]]] = []
+    cursor = 0
+    for task_id in range(groups):
+        size = base + 1 if task_id < remainder else base
+        assignments.append((task_id, pending_ids[cursor:cursor + size]))
+        cursor += size
+    return assignments
 
 
 def compute_max_parallel(config: AppConfig) -> int:
@@ -600,8 +671,25 @@ def build_job_array_mode(
         print("[PRE-CHECK] All job array tasks are complete. Skipping SLURM generation.")
         return None, 0
 
-    # 3. Format SLURM array range with original task IDs (e.g., "0-2,5,8%4")
-    array_range_str = format_slurm_array_range(pending_task_ids, max_concurrent)
+    # 3. Map pending outer combinations onto array elements. Without
+    #    num_array_jobs this is one element per combination, keyed by the
+    #    original index, so the array range stays sparse exactly as before.
+    assignments = group_outer_tasks(pending_task_ids, config.slurm.num_array_jobs)
+    packing = config.slurm.num_array_jobs is not None
+    if packing:
+        largest = max(len(members) for _, members in assignments)
+        print(
+            f"[INFO] Packing {len(pending_task_ids)} outer combination(s) into "
+            f"{len(assignments)} array element(s); up to {largest} per element."
+        )
+        print(
+            "[INFO] '--time' applies to every element, so it must cover the "
+            f"largest ({largest} combination(s) run back to back)."
+        )
+
+    array_range_str = format_slurm_array_range(
+        [task_id for task_id, _ in assignments], max_concurrent
+    )
 
     # Strip existing #SBATCH --array directives and insert the calculated range after #!/bin/bash
     lines = [
@@ -635,7 +723,22 @@ def build_job_array_mode(
     # driver's runtime checkpoint check is what skips completed points here.
     inner_line_nos_block = "\n".join(f"    {i}" for i in range(1, len(evaluated_inner) + 1))
 
-    inner_driver = build_inner_driver(ctx, config, indicator_prefix="A${TASK_ID}_")
+    # Which outer combinations each array element owns, emitted as data rather
+    # than recomputed with bash arithmetic: on a resume the pending indices are
+    # sparse, so there is no dense index space to partition arithmetically.
+    task_members_block = "\n".join(
+        f'    [{task_id}]="{" ".join(str(m) for m in members)}"'
+        for task_id, members in assignments
+    )
+
+    # The indicator keys on the outer combination index, never on the array task
+    # id. With packing those differ, and keying on the task id would give two
+    # different combinations the same indicator - and hence the same $SAVE_DIR
+    # output directory. Unpacked they are equal, so existing checkpoints and
+    # result directories keep their historical names.
+    inner_driver = build_inner_driver(
+        ctx, config, indicator_prefix="A${o_idx}_", wrap_outer_loop=True
+    )
 
     script_content = f"""{header_with_array}
 
@@ -662,19 +765,22 @@ INNER_LINE_NOS=(
 {inner_line_nos_block}
 )
 
+# Outer combinations owned by each array element (indices into OUTER_ARGS)
+TASK_MEMBERS=(
+{task_members_block}
+)
+
 TASK_ID=${{SLURM_ARRAY_TASK_ID:-0}}
-outer_args_str="${{OUTER_ARGS[$TASK_ID]}}"
-outer_desc="${{OUTER_DESCS[$TASK_ID]}}"
+read -ra MY_OUTER_IDS <<< "${{TASK_MEMBERS[$TASK_ID]}}"
 
 echo "======================= SLURM ARRAY RUN LEGEND ======================="
 echo "Array Task ID: $TASK_ID"
+echo "Outer Combinations: ${{#MY_OUTER_IDS[@]}} (indices: ${{MY_OUTER_IDS[*]}})"
 echo "Working Directory: {ctx['exec_dir']}"
 echo "Exec Path: {ctx['exec_path']}"
 echo "Fixed Args: {ctx['fixed_args_str']}"
-echo "Outer Loop Combo: $outer_desc"
-echo "Outer Flags: $outer_args_str"
 echo "Inner Args: {arg_names_display}"
 echo "Executing Subtasks: {len(pending_task_ids)} / {len(outer_combinations)} Outer Runs"
 echo "======================================================================"
 {inner_driver}"""
-    return script_content, len(pending_task_ids)
+    return script_content, len(assignments)

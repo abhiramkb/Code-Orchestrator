@@ -13,7 +13,7 @@
   "execution": {
     "multithreading_level": 1,
     "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/LO_Diffraction/sf_lo_T.jl",
+    "executable": "/projappl/lappi/abhiram/LO_Diffraction/sf_lo_L.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
@@ -25,7 +25,7 @@
   },
   "experiment": {
     "result_database_path": "/scratch/lappi/abhiram/LO_database",
-    "experiment_name": "MVe_rep0_parallel_inner_loop",
+    "experiment_name": "MVe_rep0",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
          "save_dir": "{save_dir}_{__indicator}",

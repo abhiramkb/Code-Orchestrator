@@ -5,10 +5,11 @@
     "partition": "gpumedium",
     "nodes": 1,
     "ntasks": 1,
-    "time": "23:59:00",
+    "time": "10:00:00",
     "cpus-per-task": 72,
     "gres": "gpu:gh200:1",
-    "output": "slurm_%j.log"
+    "output": "slurm_%j.log",
+    "max_concurrent_tasks": 50
   },
   "execution": {
     "interpreter": "python",
@@ -20,7 +21,7 @@
   },
   "experiment": {
     "result_database_path": "/scratch/lappi/abhiram/trip_database",
-    "experiment_name": "kcbk_median_mvgam_pd",
+    "experiment_name": "kcbk_allbks_mvgam_pd",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
          "save_dir": "{save_dir}_{__indicator}"
@@ -31,9 +32,28 @@
     "delimiter": " ",
     "arg_names": ["--Q", "beta", "--x"]
   },
+  "outer_loops": [
+    {
+      "type": "tabular_file",
+      "file_path": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/posteriorsamples.dat",
+      "delimiter": ",",
+      "comment_prefix": "#",
+      "skip_blank_lines": true,
+      "args": [
+        {
+          "arg_name": "dipole_path",
+          "column": 0,
+          "template": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/bks/{val}.dat"
+        },
+        {
+          "arg_name": "Csq",
+          "column": 3,
+          "transform": "10^x"
+        }
+      ]
+    }
+  ],
   "args": {
-    "dipole_path": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/bk_median.dat",
-    "Csq": 705.0,
     "xmax": 160.0,
     "neval": 1e9
   }

@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, List, Set, Tuple
 from config_schema import (
     validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig,
     TabularInnerLoop, TabularOuterLoop, get_slurm_cpus_per_task, parse_slurm_mem_mb,
+    parse_slurm_time_seconds,
 )
 
 # Required for constructing mode-specific portion of SLURM scripts
@@ -189,6 +190,7 @@ def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_b
     
     # Exclude internal configuration fields not meant for SBATCH
     slurm_dict.pop("max_concurrent_tasks", None)
+    slurm_dict.pop("num_array_jobs", None)
 
     slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_dict.items())
 
@@ -301,6 +303,75 @@ def warn_about_concurrency(config: AppConfig) -> None:
         print(f"[INFO] Inner loop will run up to {njobs} concurrent run(s){detail}.")
 
 
+def get_partition_max_time(partition: str) -> Tuple[Optional[int], Optional[str]]:
+    """Looks up a partition's MaxTime via scontrol.
+
+    Returns (max_seconds, error). max_seconds is None when the limit is unknown
+    or UNLIMITED. error is set only when the partition genuinely does not exist;
+    when scontrol itself is unavailable both are None so the caller skips the
+    check (e.g. a --dryrun off the cluster).
+    """
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "partition", partition],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None  # no scontrol here: nothing to check against
+
+    if result.returncode != 0:
+        return None, f"partition '{partition}' does not exist on this cluster"
+
+    match = re.search(r"MaxTime=(\S+)", result.stdout)
+    if not match:
+        return None, None
+    return parse_slurm_time_seconds(match.group(1)), None
+
+
+def validate_partition_time_limit(config: AppConfig) -> None:
+    """Rejects a requested time limit the partition would refuse.
+
+    Mirrors the executable argument check: a violation is a hard error rather
+    than a warning, since sbatch would reject the submission anyway. Runs at
+    generation time because the default workflow generates a script and submits
+    it manually later, so a submit-time-only check would miss most usage.
+    """
+    partition = config.slurm.partition
+    requested = parse_slurm_time_seconds(config.slurm.time)
+
+    max_seconds, error = get_partition_max_time(partition)
+    if error is not None:
+        print(f"\n[ERROR] Partition validation failed: {error}.", file=sys.stderr)
+        print("[ERROR] Use --notimecheck to skip this check.", file=sys.stderr)
+        sys.exit(1)
+
+    if max_seconds is None or requested is None:
+        return
+
+    if requested > max_seconds:
+        print(
+            f"\n[ERROR] Requested time '{config.slurm.time}' exceeds the limit of "
+            f"partition '{partition}'.",
+            file=sys.stderr,
+        )
+        print(
+            f"[ERROR] Partition MaxTime is {format_seconds_as_slurm_time(max_seconds)}; "
+            f"requested {format_seconds_as_slurm_time(requested)}.",
+            file=sys.stderr,
+        )
+        print("[ERROR] Use --notimecheck to skip this check.", file=sys.stderr)
+        sys.exit(1)
+
+
+def format_seconds_as_slurm_time(total_seconds: int) -> str:
+    """Renders seconds as SLURM's D-HH:MM:SS, dropping the day part when zero."""
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{days}-{stamp}" if days else stamp
+
+
 def check_generated_script(script_content: str) -> None:
     """Syntax-checks the generated bash and guards SLURM's script size limit."""
     size = len(script_content.encode("utf-8"))
@@ -347,7 +418,7 @@ def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp
 
 
 
-def generate_slurm_script(config_path, dryrunQ):
+def generate_slurm_script(config_path, dryrunQ, checktimeQ: bool = True):
     cfg = get_dict_from_config_file(config_path)
     config_file = Path(config_path)
 
@@ -355,6 +426,8 @@ def generate_slurm_script(config_path, dryrunQ):
     config: AppConfig = validate_config(cfg, config_path, dryrunQ)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
     warn_about_concurrency(config)
+    if checktimeQ:
+        validate_partition_time_limit(config)
 
     # 2. Extract execution metadata cleanly via dot-notation
     exec_cfg = config.execution
@@ -778,6 +851,11 @@ if __name__ == "__main__":
         help="Disable checking of whether args passed to the executable are supported."
     )
     parser.add_argument(
+        "--notimecheck",
+        action="store_true",
+        help="Disable checking the requested time limit against the partition's MaxTime."
+    )
+    parser.add_argument(
         "--collect",
         action="store_true",
         help="Collects results from finished SLURM jobs."
@@ -801,7 +879,9 @@ if __name__ == "__main__":
             collect_slurm_results_to_db(config_path, job_id=args.collect_job)
             continue
 
-        generated_script = generate_slurm_script(config_path, args.dryrun)
+        generated_script = generate_slurm_script(
+            config_path, args.dryrun, checktimeQ=not args.notimecheck
+        )
 
         if generated_script is None:
             print(f"[INFO] Nothing to submit for {config_path}: all tasks already checkpointed.")

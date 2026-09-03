@@ -111,6 +111,11 @@ class SlurmConfig(BaseModel):
     time: str
     output: str = Field(default="slurm_%j.log", alias="output") # Output set in setup_experiment_directories function if experiment tracking info is provided.
     max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
+    # Number of SLURM array elements to spread the outer loop over. Fewer elements
+    # than outer combinations packs several combinations into each element, which is
+    # how a sweep larger than MaxArraySize (or than a submit limit) gets submitted.
+    # Omit to keep one array element per outer combination.
+    num_array_jobs: Optional[int] = Field(default=None, ge=1, alias="num_array_jobs")
 
     model_config = {"extra": "allow", "populate_by_name": True}
 
@@ -144,6 +149,45 @@ def parse_slurm_mem_mb(value: Any) -> Optional[int]:
         return None
     scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024.0}
     return int(float(match.group(1)) * scale[(match.group(2) or "M").upper()])
+
+
+def parse_slurm_time_seconds(value: Any) -> Optional[int]:
+    """Parses a SLURM time limit into seconds.
+
+    Accepts every format sbatch does: "MM", "MM:SS", "HH:MM:SS", "D-HH",
+    "D-HH:MM" and "D-HH:MM:SS". Returns None for UNLIMITED/INFINITE or anything
+    unparseable, so callers can treat "unknown" and "no limit" the same way.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in {"UNLIMITED", "INFINITE", "NONE"}:
+        return None
+
+    days = 0
+    if "-" in text:
+        day_part, _, text = text.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+        # With a day part the remainder is HH[:MM[:SS]], never MM:SS.
+        fields = text.split(":") if text else ["0"]
+        if len(fields) > 3 or not all(f.isdigit() for f in fields):
+            return None
+        fields += ["0"] * (3 - len(fields))
+        hours, minutes, seconds = (int(f) for f in fields)
+    else:
+        fields = text.split(":")
+        if len(fields) > 3 or not all(f.isdigit() for f in fields):
+            return None
+        if len(fields) == 1:            # bare number is minutes
+            hours, minutes, seconds = 0, int(fields[0]), 0
+        elif len(fields) == 2:          # MM:SS
+            hours, minutes, seconds = 0, int(fields[0]), int(fields[1])
+        else:                           # HH:MM:SS
+            hours, minutes, seconds = (int(f) for f in fields)
+
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
 class TabularInnerLoop(BaseModel):

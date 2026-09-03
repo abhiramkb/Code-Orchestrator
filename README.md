@@ -38,6 +38,7 @@ python3 orchestrator.py my_config.json --collect-job 12345678
 | `--submit` | Submit the generated script with `sbatch`. |
 | `--dryrun` | Generate the script only; also relaxes file-existence validation. |
 | `--noargcheck` | Skip probing the executable's `--help` to verify that every configured flag is supported. |
+| `--notimecheck` | Skip checking the requested `time` against the partition's `MaxTime`. |
 | `--collect` | Parse SLURM logs and write all runs into `<exp_dir>/results.db`. |
 | `--collect-job <id>` | Same, restricted to one job ID, written to `<exp_dir>/results_<id>.db`. |
 
@@ -87,6 +88,10 @@ In job array mode the outer combinations form the SLURM array (one task per Cart
 Every key is emitted verbatim as `#SBATCH --<key>=<value>`, so any SBATCH option is accepted (`account`, `mem`, `cpus-per-task`, `ntasks`, …). `partition` and `time` are required; `job-name` defaults to `orchestrator`, `nodes` to `1`, `output` to `slurm_%j.log`.
 
 `max_concurrent_tasks` is consumed by the orchestrator rather than emitted: it becomes the `%N` throttle on the array directive (e.g. `#SBATCH --array=0-7%2`).
+
+`num_array_jobs` is likewise consumed rather than emitted, and sets how many array elements the outer loop is spread over — see [Packing the outer loop](#packing-the-outer-loop).
+
+Before a script is written, the requested `time` is checked against the partition's `MaxTime` (via `scontrol`) in the same spirit as the executable argument check: exceeding it, or naming a partition that does not exist, is an error rather than something `sbatch` rejects later. The check is skipped silently where `scontrol` is unavailable, and `--notimecheck` disables it.
 
 ### `inner_loop`
 
@@ -312,6 +317,27 @@ An explicit sweep works the same way and needs no data file:
   }
 }
 ```
+
+---
+
+## Packing the Outer Loop
+
+By default each outer-loop combination gets its own SLURM array element. `slurm.num_array_jobs` spreads them over a fixed number of elements instead, packing several combinations into each:
+
+```json
+"slurm": { "num_array_jobs": 80 }
+```
+
+With 100 pending combinations that yields `#SBATCH --array=0-79`: the first 20 elements process 2 combinations each, the remaining 60 process 1. Group sizes always differ by at most one. Omit the key to keep one element per combination, which reproduces the historical sparse `--array=0-2,5,8` behaviour exactly.
+
+This is what makes a sweep larger than the cluster's `MaxArraySize` submittable at all, and it helps where an account's job-submission limit is tight.
+
+Two things to keep in mind:
+
+- **`--time` applies to every element**, so it must cover the *largest* group — that many combinations running back to back. The orchestrator prints the largest group size at generation time; sizing `time` is your responsibility, and the partition check will catch an over-limit result.
+- Packing is computed over the **pending** combinations, so a resumed run repacks whatever is left rather than reserving elements for finished work.
+
+Checkpointing is unaffected. Run indicators key on the outer combination index (`A<combo>_L<line>`), not on the array element, so markers and per-run output directories keep the same names whatever `num_array_jobs` is set to — you can change it mid-campaign and completed work is still recognised.
 
 ---
 
