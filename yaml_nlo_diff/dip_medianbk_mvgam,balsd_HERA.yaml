@@ -1,0 +1,42 @@
+slurm:
+  account: lappi
+  job-name: dip_HERA
+  partition: small
+  nodes: 1
+  ntasks: 1
+  time: "23:59:00"
+  cpus-per-task: 16
+  mem: 10G
+  output: slurm_%j.log
+
+execution:
+  interpreter: julia
+  executable: /projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_nlo_sdaw_dip_L.jl
+  modules:
+    - openmpi
+    - julia/1.11.9
+    - julia-mpi
+  env_vars:
+    JULIA_NUM_THREADS: $SLURM_CPUS_PER_TASK
+
+experiment:
+  result_database_path: /scratch/lappi/abhiram/dip_database
+  experiment_name: median_mvgam_balsd
+  slrm_output_dir: SLURM_OUTPUT
+  tracking_args:
+    save_dir: "{save_dir}_{__indicator}"
+    json: "{save_dir}_{__indicator}/result.json"
+
+inner_loop:
+  file_path: /projappl/lappi/abhiram/trip/HERA_kinematic_points_highQ_smallx.txt
+  delimiter: " "
+  arg_names:
+    - --Q
+    - beta
+    - --x
+
+args:
+  dipole_path: /projappl/lappi/abhiram/nlobk-nlodisft/data/mvgam,balsd/median_bk.dat
+  Csq: 915
+  xmax: 160.0
+  neval: 400000000.0

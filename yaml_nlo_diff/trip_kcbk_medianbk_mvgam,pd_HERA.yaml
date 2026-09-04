@@ -1,0 +1,38 @@
+slurm:
+  account: lappi
+  job-name: trip_HERA
+  partition: gpumedium
+  nodes: 1
+  ntasks: 1
+  time: "23:59:00"
+  cpus-per-task: 72
+  gres: gpu:gh200:1
+  output: slurm_%j.log
+
+execution:
+  interpreter: python
+  executable: /projappl/lappi/abhiram/trip/kcbk_codes/sf_batched_nlo_pdgm_trip_T.py
+  modules:
+    - python-tensorflow
+  env_vars: {}
+
+experiment:
+  result_database_path: /scratch/lappi/abhiram/trip_database
+  experiment_name: kcbk_median_mvgam_pd
+  slrm_output_dir: SLURM_OUTPUT
+  tracking_args:
+    save_dir: "{save_dir}_{__indicator}"
+
+inner_loop:
+  file_path: /projappl/lappi/abhiram/trip/HERA_kinematic_points_smallx.txt
+  delimiter: " "
+  arg_names:
+    - --Q
+    - beta
+    - --x
+
+args:
+  dipole_path: /projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/bk_median.dat
+  Csq: 705.0
+  xmax: 160.0
+  neval: 1000000000.0
