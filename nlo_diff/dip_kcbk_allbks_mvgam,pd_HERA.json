@@ -6,21 +6,23 @@
     "nodes": 1,
     "ntasks": 1,
     "time": "1-12:59:00",
-    "cpus-per-task": 16,
-    "mem": "40G",
+    "cpus-per-task": 192,
+    "mem": "60G",
     "output": "slurm_%j.log",
-    "max_concurrent_tasks": 25
+    "max_concurrent_tasks": 25,
+    "num_array_jobs": 25
   },
   "execution": {
+    "multithreading_level": 16,
     "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/kcbk_codes/sf_nlo_pdgm_dip_T.jl",
+    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/kcbk_codes/sf_nlo_pdgm_dip_L.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
       "julia-mpi"
     ],
     "env_vars": {
-      "JULIA_NUM_THREADS": "$SLURM_CPUS_PER_TASK"
+      "JULIA_NUM_THREADS": "$MULTITHREADING_LEVEL"
     }
   },
   "experiment": {
