@@ -13,7 +13,11 @@ import sqlite3
 from typing import Any, Dict, Optional, List, Set, Tuple
 
 # Required for Pydantic based validation of input config file
-from config_schema import validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig, TabularOuterLoop
+from config_schema import (
+    validate_config, AppConfig, ExperimentConfig, SlurmConfig, ExecutionConfig,
+    TabularInnerLoop, TabularOuterLoop, get_slurm_cpus_per_task, parse_slurm_mem_mb,
+    parse_slurm_time_seconds,
+)
 
 # Required for constructing mode-specific portion of SLURM scripts
 from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
@@ -66,7 +70,8 @@ def build_experiment_strings(experiment: Optional[ExperimentConfig], mode_index)
     """
     if experiment is None:
         exp_env_block = """
-export CHECKPOINT_DIR="./checkpoints"
+# Absolute so it still resolves after the script cd's to the executable directory
+export CHECKPOINT_DIR="$(pwd)/checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 """
         exp_args_block = '\n    exp_args=""'
@@ -122,11 +127,16 @@ def setup_experiment_directories(
     slurm: SlurmConfig,
     config_file: Path,
     mode_index: int,
-    dryrun_q: bool
-) -> Path:
+    dryrun_q: bool,
+    timestamp: str,
+) -> Optional[Path]:
     """
-    Creates SLURM output directory and backs up the config file if dryrun is False.
-    Updates slurm.output directly on the SlurmConfig model.
+    Creates the SLURM output directory and updates slurm.output on the model.
+
+    Returns the path the run's backup directory *should* take, without creating
+    it. Creation is deferred to write_script, so a run that turns out to have
+    nothing to submit - or whose script fails its syntax check - leaves no
+    stray timestamped directory behind.
     """
     if experiment is None:
         return
@@ -147,18 +157,9 @@ def setup_experiment_directories(
     except Exception as e:
         print(f"[WARNING] Could not create SLRM_OUTPUT_DIR '{full_slrm_output_dir}': {e}", file=sys.stderr)
 
-    backup_dir = None # Function returns backup_dir (which is defined below in case it is created)
-
-    if not dryrun_q:
-        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = Path(db_path) / exp_name / datetime_str
-        try:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(config_file, backup_dir / config_file.name)
-            print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
-        except Exception as e:
-            print(f"[WARNING] Could not copy config file to '{backup_dir}': {e}", file=sys.stderr)
-    return backup_dir
+    if dryrun_q:
+        return None
+    return Path(db_path) / exp_name / timestamp
   
 def _get_generator_git_commit() -> str:
     """Retrieves the git commit hash of the file's repository."""
@@ -176,7 +177,13 @@ def _get_generator_git_commit() -> str:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return "UNKNOWN (not a git repo or git not installed)"
 
-def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_block: str) -> str:
+def build_common_header(
+    slurm: SlurmConfig,
+    exec_cfg: ExecutionConfig,
+    exp_env_block: str,
+    timestamp: str = "",
+    backup_dir: Optional[Path] = None,
+) -> str:
     """Generates the SBATCH headers, environment modules, export variables, and print helper function."""
     generator_commit = _get_generator_git_commit()
 
@@ -185,6 +192,7 @@ def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_b
     
     # Exclude internal configuration fields not meant for SBATCH
     slurm_dict.pop("max_concurrent_tasks", None)
+    slurm_dict.pop("num_array_jobs", None)
 
     slurm_header = "".join(f'#SBATCH --{k}={v}\n' for k, v in slurm_dict.items())
 
@@ -194,10 +202,24 @@ def build_common_header(slurm: SlurmConfig, exec_cfg: ExecutionConfig, exp_env_b
         if modules else "# No environment modules specified"
     )
 
+    # Exported before env_vars so a config can set e.g. JULIA_NUM_THREADS to
+    # "$MULTITHREADING_LEVEL" and get the per-run thread count.
+    level_block = (
+        f"\n# Cores used by one invocation of the executable\n"
+        f"export MULTITHREADING_LEVEL={exec_cfg.multithreading_level}"
+        if exec_cfg.multithreading_level is not None else ""
+    )
+
     env_vars = exec_cfg.env_vars
     env_var_block = (
         "\n# Set Environment Variables\n" + "\n".join(f'export {k}={v}' for k, v in env_vars.items())
         if env_vars else "# No environment variables specified"
+    )
+
+    preamble = exec_cfg.preamble
+    preamble_block = (
+        "\n# User-Supplied Preamble\n" + preamble
+        if preamble else "# No preamble specified"
     )
 
     print_args_def = """
@@ -229,46 +251,237 @@ print_args() {
     done
 }
 """
+    # Echoed (not just commented) so the generation timestamp lands in the SLURM
+    # output itself, tying a job back to the config/script snapshot that produced
+    # it. Carries no '_out]' or 'Job duration:' text, so --collect ignores it.
+    provenance_lines = [f'echo "[GENERATION] Script generated at: {timestamp}"'] if timestamp else []
+    if backup_dir is not None:
+        provenance_lines.append(f'echo "[GENERATION] Config/script snapshot: {backup_dir}"')
+    provenance_block = "\n".join(provenance_lines)
+
     return f"""#!/bin/bash
 {slurm_header}
 
 # =========================================================================
 # GENERATOR METADATA
 # Generated by Orchestrator Commit: {generator_commit}
+# Generation timestamp: {timestamp}
 # =========================================================================
+{provenance_block}
 
 {exp_env_block}
 {module_load_block}
+{level_block}
 {env_var_block}
+{preamble_block}
 {print_args_def}"""
 
 
-def write_script(script_content: str, mode_prefix: str, exp_name: str, timestamp: str, backup_dir: Optional[Path] = None) -> Path:
+def warn_about_concurrency(config: AppConfig) -> None:
+    """Flags configurations whose thread settings will oversubscribe the node.
+
+    Thread counts stay the user's responsibility (nothing is rewritten), but an
+    env var still pinned to $SLURM_CPUS_PER_TASK while the inner loop runs N ways
+    concurrently means N x the cores are requested, which is slower than running
+    sequentially. Warn rather than block.
+    """
+    level = config.execution.multithreading_level
+    if level is None:
+        return
+
+    offenders = [
+        k for k, v in config.execution.env_vars.items()
+        if "SLURM_CPUS_PER_TASK" in str(v)
+    ]
+    if offenders:
+        print(
+            f"[WARNING] {', '.join(offenders)} still reference(s) $SLURM_CPUS_PER_TASK while "
+            f"multithreading_level={level} is set.",
+            file=sys.stderr,
+        )
+        print(
+            "[WARNING] Each concurrent run would request the whole allocation. Set these to "
+            "$MULTITHREADING_LEVEL (exported by the generated script) or a literal value.",
+            file=sys.stderr,
+        )
+
+    cpus = get_slurm_cpus_per_task(config.slurm)
+    if cpus:
+        njobs = max(1, cpus // level)
+        mem_mb = parse_slurm_mem_mb((config.slurm.model_extra or {}).get("mem"))
+        detail = ""
+        if mem_mb and njobs > 1:
+            detail = f"; --mem is shared, leaving ~{mem_mb // njobs} MB per concurrent run"
+        print(f"[INFO] Inner loop will run up to {njobs} concurrent run(s){detail}.")
+
+
+def get_partition_max_time(partition: str) -> Tuple[Optional[int], Optional[str]]:
+    """Looks up a partition's MaxTime via scontrol.
+
+    Returns (max_seconds, error). max_seconds is None when the limit is unknown
+    or UNLIMITED. error is set only when the partition genuinely does not exist;
+    when scontrol itself is unavailable both are None so the caller skips the
+    check (e.g. a --dryrun off the cluster).
+    """
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "partition", partition],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None  # no scontrol here: nothing to check against
+
+    if result.returncode != 0:
+        return None, f"partition '{partition}' does not exist on this cluster"
+
+    match = re.search(r"MaxTime=(\S+)", result.stdout)
+    if not match:
+        return None, None
+    return parse_slurm_time_seconds(match.group(1)), None
+
+
+def validate_partition_time_limit(config: AppConfig) -> None:
+    """Rejects a requested time limit the partition would refuse.
+
+    Mirrors the executable argument check: a violation is a hard error rather
+    than a warning, since sbatch would reject the submission anyway. Runs at
+    generation time because the default workflow generates a script and submits
+    it manually later, so a submit-time-only check would miss most usage.
+    """
+    partition = config.slurm.partition
+    requested = parse_slurm_time_seconds(config.slurm.time)
+
+    max_seconds, error = get_partition_max_time(partition)
+    if error is not None:
+        print(f"\n[ERROR] Partition validation failed: {error}.", file=sys.stderr)
+        print("[ERROR] Use --notimecheck to skip this check.", file=sys.stderr)
+        sys.exit(1)
+
+    if max_seconds is None or requested is None:
+        return
+
+    if requested > max_seconds:
+        print(
+            f"\n[ERROR] Requested time '{config.slurm.time}' exceeds the limit of "
+            f"partition '{partition}'.",
+            file=sys.stderr,
+        )
+        print(
+            f"[ERROR] Partition MaxTime is {format_seconds_as_slurm_time(max_seconds)}; "
+            f"requested {format_seconds_as_slurm_time(requested)}.",
+            file=sys.stderr,
+        )
+        print("[ERROR] Use --notimecheck to skip this check.", file=sys.stderr)
+        sys.exit(1)
+
+
+def format_seconds_as_slurm_time(total_seconds: int) -> str:
+    """Renders seconds as SLURM's D-HH:MM:SS, dropping the day part when zero."""
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    stamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{days}-{stamp}" if days else stamp
+
+
+def check_generated_script(script_content: str) -> None:
+    """Syntax-checks the generated bash and guards SLURM's script size limit."""
+    size = len(script_content.encode("utf-8"))
+    if size > 120_000:
+        print(
+            f"[ERROR] Generated script is {size} bytes; SLURM rejects scripts over 131072. "
+            "Reduce the parameter space or split the config.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        result = subprocess.run(
+            ["bash", "-n"], input=script_content, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[WARNING] Could not syntax-check the generated script: {e}", file=sys.stderr)
+        return
+
+    if result.returncode != 0:
+        print("[ERROR] Generated script failed 'bash -n' syntax check:", file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        sys.exit(1)
+
+
+def write_script(
+    script_content: str,
+    mode_prefix: str,
+    exp_name: str,
+    timestamp: str,
+    backup_dir: Optional[Path] = None,
+    config_file: Optional[Path] = None,
+) -> Path:
     """
     Writes the script content to a file and prints the location.
     mode_prefix is one of 'single', 'inner', 'array'.
 
-    Also copies script file to backup directory if provided.
+    Also snapshots the config and the script into the backup directory, which is
+    created here rather than earlier so that it only ever exists for a run that
+    actually produced a script.
     """
+    check_generated_script(script_content)
+
     script_file = Path(f"submit_{mode_prefix}_{exp_name}_{timestamp}.sh")
     script_file.write_text(script_content)
     print(f"Generated {mode_prefix}-run SLURM script: {script_file}")
+
     if backup_dir is not None:
-      backup_dir.mkdir(parents=True, exist_ok=True)
-      shutil.copy2(script_file, backup_dir / script_file.name)
-      print(f"[INFO] Copied SLURM script to: {backup_dir / script_file.name}")
-  
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            if config_file is not None:
+                shutil.copy2(config_file, backup_dir / config_file.name)
+                print(f"[INFO] Copied config file to: {backup_dir / config_file.name}")
+            shutil.copy2(script_file, backup_dir / script_file.name)
+            print(f"[INFO] Copied SLURM script to: {backup_dir / script_file.name}")
+        except Exception as e:
+            print(f"[WARNING] Could not populate backup directory '{backup_dir}': {e}", file=sys.stderr)
+
     return script_file
 
 
+def discard_backup_dir(backup_dir: Optional[Path]) -> None:
+    """Removes a run's backup directory after a submission that produced no job.
 
-def generate_slurm_script(config_path, dryrunQ):
+    Only ever called for a directory this run created (<db>/<exp>/<timestamp>),
+    so there is nothing here that could reach pre-existing results.
+    """
+    if backup_dir is None or not backup_dir.is_dir():
+        return
+    try:
+        shutil.rmtree(backup_dir)
+        print(f"[INFO] Removed backup directory for the failed submission: {backup_dir}")
+    except Exception as e:
+        print(f"[WARNING] Could not remove backup directory '{backup_dir}': {e}", file=sys.stderr)
+
+
+
+def generate_slurm_script(
+    config_path, dryrunQ, checktimeQ: bool = True
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Generates the submission script. Returns (script_path, backup_dir).
+
+    script_path is None when there is nothing left to submit. backup_dir is
+    returned so the caller can discard the snapshot if submission then fails.
+    """
     cfg = get_dict_from_config_file(config_path)
     config_file = Path(config_path)
+
+    # One timestamp for the whole run: it names the backup directory, names the
+    # script, and is echoed into the SLURM output, so all three always agree.
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # 1. Validate & convert raw dict to typed AppConfig object
     config: AppConfig = validate_config(cfg, config_path, dryrunQ)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
+    warn_about_concurrency(config)
+    if checktimeQ:
+        validate_partition_time_limit(config)
 
     # 2. Extract execution metadata cleanly via dot-notation
     exec_cfg = config.execution
@@ -277,11 +490,15 @@ def generate_slurm_script(config_path, dryrunQ):
     max_concurrent = slurm_cfg.max_concurrent_tasks  # Defined on SlurmConfig model
 
     # 3. Filesystem setup (directories + config backup, function returns backup_dir path if created)
-    backup_dir = setup_experiment_directories(experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ)
+    backup_dir = setup_experiment_directories(
+        experiment_cfg, slurm_cfg, config_file, config.mode_index, dryrunQ, timestamp
+    )
 
     # 4. Build experiment strings & execution context
     exp_name, exp_env_block, exp_args_block = build_experiment_strings(experiment_cfg, config.mode_index)
-    common_header = build_common_header(slurm_cfg, exec_cfg, exp_env_block)
+    common_header = build_common_header(
+        slurm_cfg, exec_cfg, exp_env_block, timestamp, backup_dir
+    )
 
     exec_path = Path(exec_cfg.executable).resolve()
     exec_dir = exec_path.parent
@@ -290,8 +507,13 @@ def generate_slurm_script(config_path, dryrunQ):
     exec_sig_components = [exec_cfg.interpreter, flags_str, str(exec_path), fixed_args_str]
     exec_sig_str = " ".join(p for p in exec_sig_components if p)
 
+    checkpoint_dir = (
+        Path(experiment_cfg.checkpoint_dir) if experiment_cfg else Path("checkpoints").resolve()
+    )
+
     ctx = {
         "exec_cfg": exec_cfg,
+        "checkpoint_dir": checkpoint_dir,
         "exec_path": exec_path,
         "exec_dir": exec_dir,
         "flags_str": flags_str,
@@ -301,27 +523,37 @@ def generate_slurm_script(config_path, dryrunQ):
         "common_header": common_header,
     }
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     # 5. Clean Mode Routing via computed config properties
     mode_index = config.mode_index
 
     if mode_index == 0:
         # Mode 0: Single Run
         script_content = build_single_mode(ctx, config)
-        return write_script(script_content, "single", exp_name, timestamp, backup_dir)
+        if script_content is None:
+            return None, None
+        return write_script(
+            script_content, "single", exp_name, timestamp, backup_dir, config_file
+        ), backup_dir
 
     elif mode_index == 1:
         # Mode 1: Inner Loop Only
         script_content = build_inner_loop_mode(ctx, config)
-        return write_script(script_content, "inner", exp_name, timestamp, backup_dir)
+        if script_content is None:
+            return None, None
+        return write_script(
+            script_content, "inner", exp_name, timestamp, backup_dir, config_file
+        ), backup_dir
 
     else:
         # Mode 2: Array Mode (Outer + Inner Loops)
         script_content, total_tasks = build_job_array_mode(ctx, config, max_concurrent)
-        script_file = write_script(script_content, "array", exp_name, timestamp, backup_dir)
+        if script_content is None:
+            return None, None
+        script_file = write_script(
+            script_content, "array", exp_name, timestamp, backup_dir, config_file
+        )
         print(f"({total_tasks} tasks)")
-        return script_file
+        return script_file, backup_dir
 
 def extract_config_flags(config: AppConfig) -> Tuple[Set[str], Set[str]]:
     """Collects all argument keys across all configuration sections in AppConfig
@@ -334,8 +566,13 @@ def extract_config_flags(config: AppConfig) -> Tuple[Set[str], Set[str]]:
         raw_keys.update(config.args.keys())
 
     # 2. Inner loop argument names
-    if config.inner_loop:
-        raw_keys.update(config.inner_loop.arg_names)
+    inner_cfg = config.inner_loop
+    if inner_cfg is not None:
+        if isinstance(inner_cfg, TabularInnerLoop):
+            # arg_name_list is populated from either 'args' or the 'arg_names' shorthand
+            raw_keys.update(inner_cfg.arg_name_list)
+        elif getattr(inner_cfg, "arg_name", None):
+            raw_keys.add(inner_cfg.arg_name)
 
     # 3. Outer loop argument names
     for block in config.outer_loops:
@@ -421,9 +658,17 @@ def validate_script_args(config: AppConfig) -> Tuple[bool, List[str]]:
 def submit_slurm_script(
     script_path: Path,
     config: AppConfig,
-    checkargs_q: bool
+    checkargs_q: bool,
+    backup_dir: Optional[Path] = None,
 ) -> None:
-    """Submits the generated script to SLURM."""
+    """Submits the generated script to SLURM.
+
+    If submission was attempted but produced no job - a rejected sbatch, a
+    missing sbatch, or arguments that failed validation before sbatch ran - the
+    run's backup directory is discarded, so only snapshots corresponding to a
+    real job survive. A run generated without --submit keeps its snapshot, since
+    it is still waiting to be submitted by hand.
+    """
 
     if checkargs_q:
         print("\n[INFO] Validating arguments passed to executable...")
@@ -435,6 +680,7 @@ def submit_slurm_script(
         if not validation_result:
             print("\n[ERROR] Argument validation failed!", file=sys.stderr)
             print(f"[ERROR] Offending args: {' '.join(failed_args)}", file=sys.stderr)
+            discard_backup_dir(backup_dir)
             sys.exit(1)
         else:
             print("\n[SUCCESS] Argument validation succeeded!")
@@ -446,9 +692,11 @@ def submit_slurm_script(
         print(f"[SUCCESS] {result.stdout.strip()}")
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] SLURM Submission failed:\n{e.stderr}", file=sys.stderr)
+        discard_backup_dir(backup_dir)
         sys.exit(1)
     except FileNotFoundError:
         print("[ERROR] 'sbatch' command not found. Are you on a SLURM cluster node?", file=sys.stderr)
+        discard_backup_dir(backup_dir)
         sys.exit(1)
 
 # Collection function from https://share.gemini.google/ldX5zTud8zOv, https://share.gemini.google/IEM7GOQgmFCx
@@ -676,6 +924,11 @@ if __name__ == "__main__":
         help="Disable checking of whether args passed to the executable are supported."
     )
     parser.add_argument(
+        "--notimecheck",
+        action="store_true",
+        help="Disable checking the requested time limit against the partition's MaxTime."
+    )
+    parser.add_argument(
         "--collect",
         action="store_true",
         help="Collects results from finished SLURM jobs."
@@ -699,13 +952,19 @@ if __name__ == "__main__":
             collect_slurm_results_to_db(config_path, job_id=args.collect_job)
             continue
 
-        generated_script = generate_slurm_script(config_path, args.dryrun)
+        generated_script, backup_dir = generate_slurm_script(
+            config_path, args.dryrun, checktimeQ=not args.notimecheck
+        )
+
+        if generated_script is None:
+            print(f"[INFO] Nothing to submit for {config_path}: all tasks already checkpointed.")
+            continue
 
         if args.dryrun:
             print(f"[INFO] Dry-run: not submitting to SLURM for {config_path}.")
         elif args.submit:
             cfg = get_dict_from_config_file(config_path)
             config: AppConfig = validate_config(cfg, config_path, args.dryrun)
-            submit_slurm_script(generated_script, config, checkargsQ)
+            submit_slurm_script(generated_script, config, checkargsQ, backup_dir)
         else:
             print(f"[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")

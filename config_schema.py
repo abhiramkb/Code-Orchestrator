@@ -1,7 +1,8 @@
+import re
 import sys
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
-from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, computed_field, field_validator, model_validator
 
 def determine_loop_q(cfg: dict) -> bool:
     """Determines if loop mode is active based on config flags and structure."""
@@ -35,13 +36,13 @@ def determine_loop_q(cfg: dict) -> bool:
 
 # --- 1. Outer Loop Polymorphic Models ---
 
-class ExplicitOuterLoop(BaseModel):
+class ExplicitLoop(BaseModel):
     type: Literal["explicit"] = "explicit"
     arg_name: str
     values: List[Any]
 
 
-class RangeOuterLoop(BaseModel):
+class RangeLoop(BaseModel):
     type: Literal["range"]
     arg_name: str
     start: float
@@ -76,7 +77,7 @@ class TabularOuterLoop(BaseModel):
 
 # Tagged Union discriminator routes validation based on the 'type' field
 OuterLoopBlock = Annotated[
-    Union[ExplicitOuterLoop, RangeOuterLoop, TabularOuterLoop],
+    Union[ExplicitLoop, RangeLoop, TabularOuterLoop],
     Field(discriminator="type"),
 ]
 
@@ -84,11 +85,23 @@ OuterLoopBlock = Annotated[
 # --- 2. Sub-Section Models ---
 
 class ExecutionConfig(BaseModel):
-    interpreter: Optional[str] = Field(default=None)
+    # 'language' is the legacy spelling of 'interpreter'. Both are accepted; an explicit
+    # 'interpreter' wins if a config carries both.
+    interpreter: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("interpreter", "language")
+    )
     flags: Optional[List[str]] = Field(default_factory=list)
     executable: str
     modules: List[str] = Field(default_factory=list)
     env_vars: Dict[str, Any] = Field(default_factory=dict)
+    preamble: Optional[str] = None
+    # Cores used by ONE invocation of the executable. When set, the inner loop runs
+    # floor(SLURM_CPUS_PER_TASK / multithreading_level) iterations concurrently.
+    # Omit it (the default) to keep the inner loop strictly sequential.
+    # ge=1 also guards the runtime division in the generated script.
+    multithreading_level: Optional[int] = Field(default=None, ge=1)
+    # Optional hard ceiling on concurrency, e.g. to stay within --mem.
+    max_parallel_tasks: Optional[int] = Field(default=None, ge=1)
 
 
 class SlurmConfig(BaseModel):
@@ -98,16 +111,107 @@ class SlurmConfig(BaseModel):
     time: str
     output: str = Field(default="slurm_%j.log", alias="output") # Output set in setup_experiment_directories function if experiment tracking info is provided.
     max_concurrent_tasks: Optional[int] = Field(default=None, alias="max_concurrent_tasks")
+    # Number of SLURM array elements to spread the outer loop over. Fewer elements
+    # than outer combinations packs several combinations into each element, which is
+    # how a sweep larger than MaxArraySize (or than a submit limit) gets submitted.
+    # Omit to keep one array element per outer combination.
+    num_array_jobs: Optional[int] = Field(default=None, ge=1, alias="num_array_jobs")
 
     model_config = {"extra": "allow", "populate_by_name": True}
 
 
-class InnerLoopConfig(BaseModel):
+def get_slurm_cpus_per_task(slurm: SlurmConfig) -> Optional[int]:
+    """Reads 'cpus-per-task' from the SLURM block.
+
+    SlurmConfig allows arbitrary SBATCH keys, so anything not declared as a field
+    lands in model_extra under its literal JSON spelling. Returns None if unset.
+    """
+    extra = slurm.model_extra or {}
+    raw = extra.get("cpus-per-task", extra.get("cpus_per_task"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_slurm_mem_mb(value: Any) -> Optional[int]:
+    """Parses a SLURM memory value ('10G', '512M', '2048') into whole MB.
+
+    A bare number is MB, matching SLURM's own convention. Returns None if the
+    value cannot be interpreted.
+    """
+    if value is None:
+        return None
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT])?B?\s*", str(value), re.IGNORECASE)
+    if not match:
+        return None
+    scale = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024.0}
+    return int(float(match.group(1)) * scale[(match.group(2) or "M").upper()])
+
+
+def parse_slurm_time_seconds(value: Any) -> Optional[int]:
+    """Parses a SLURM time limit into seconds.
+
+    Accepts every format sbatch does: "MM", "MM:SS", "HH:MM:SS", "D-HH",
+    "D-HH:MM" and "D-HH:MM:SS". Returns None for UNLIMITED/INFINITE or anything
+    unparseable, so callers can treat "unknown" and "no limit" the same way.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in {"UNLIMITED", "INFINITE", "NONE"}:
+        return None
+
+    days = 0
+    if "-" in text:
+        day_part, _, text = text.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+        # With a day part the remainder is HH[:MM[:SS]], never MM:SS.
+        fields = text.split(":") if text else ["0"]
+        if len(fields) > 3 or not all(f.isdigit() for f in fields):
+            return None
+        fields += ["0"] * (3 - len(fields))
+        hours, minutes, seconds = (int(f) for f in fields)
+    else:
+        fields = text.split(":")
+        if len(fields) > 3 or not all(f.isdigit() for f in fields):
+            return None
+        if len(fields) == 1:            # bare number is minutes
+            hours, minutes, seconds = 0, int(fields[0]), 0
+        elif len(fields) == 2:          # MM:SS
+            hours, minutes, seconds = 0, int(fields[0]), int(fields[1])
+        else:                           # HH:MM:SS
+            hours, minutes, seconds = (int(f) for f in fields)
+
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+class TabularInnerLoop(BaseModel):
+    type: Literal["tabular_file"]
     file_path: Optional[Path] = None
     delimiter: str = Field(default=" ")
     comment_prefix: str = "#"
     args: List[TabularArgSpec] = []
     arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
+    skip_blank_lines: bool = True
+
+    # In case an old config uses 'inner_loop' as a dict without a 'type', we can migrate it to the new structure.
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_inner_loop(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        inner_loop = data.get("inner_loop")
+
+        if isinstance(inner_loop, dict) and "type" not in inner_loop:
+            inner_loop["type"] = "tabular_file"
+
+        return data
 
     @field_validator("file_path")
     @classmethod
@@ -120,7 +224,7 @@ class InnerLoopConfig(BaseModel):
         return v
     
     @model_validator(mode="after")
-    def migrate_arg_names(self) -> "InnerLoopConfig":
+    def migrate_arg_names(self) -> "TabularInnerLoop":
         """Converts 'arg_names' list into structured 'args' column specifications."""
         if not self.args and self.arg_names:
             self.args = [
@@ -128,13 +232,19 @@ class InnerLoopConfig(BaseModel):
                 for idx, name in enumerate(self.arg_names)
             ]
         if not self.args:
-            raise ValueError("InnerLoopConfig requires 'args' (or simpler 'arg_names').")
+            raise ValueError("TabularInnerLoop requires 'args' (or simpler 'arg_names').")
         return self
 
     @property
     def arg_name_list(self) -> List[str]:
         """Convenience property for legends and validation checks."""
         return [spec.arg_name for spec in self.args]
+
+# Tagged Union discriminator routes validation based on the 'type' field
+InnerLoop = Annotated[
+    Union[ExplicitLoop, TabularInnerLoop],
+    Field(discriminator="type"),
+]
 
 
 class ExperimentConfig(BaseModel):
@@ -143,6 +253,13 @@ class ExperimentConfig(BaseModel):
     slrm_output_dir: str
     tracking_args: Optional[Dict[str, str]] = None
 
+    @computed_field
+    @property
+    def checkpoint_dir(self) -> str:
+        # Path() normalizes extra slashes automatically
+        full_path = Path(self.result_database_path) / self.experiment_name / "checkpoints"
+        return str(full_path)
+
 
 # --- 3. Root Application Schema ---
 
@@ -150,10 +267,41 @@ class AppConfig(BaseModel):
     loopQ: Optional[bool] = None  # Optional explicit flag from config JSON
     execution: ExecutionConfig
     slurm: SlurmConfig
-    inner_loop: Optional[InnerLoopConfig] = None
+    inner_loop: Optional[InnerLoop] = None
     outer_loops: List[OuterLoopBlock] = []
     experiment: Optional[ExperimentConfig] = None
     args: Dict[str, Any] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def preprocess_legacy_inner_loop(cls, data: Any) -> Any:
+        """Inject default 'type' into inner_loop dictionary before discriminator check."""
+        if isinstance(data, dict):
+            inner_loop = data.get("inner_loop")
+            if isinstance(inner_loop, dict) and "type" not in inner_loop:
+                # Modifying a shallow copy or in-place to set default discriminator tag
+                data["inner_loop"]["type"] = "tabular_file"
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_inner_files(cls, data: Any) -> Any:
+        """Rejects the withdrawn per-outer-value 'inner_files' mapping.
+
+        Inner loops are now evaluated once in Python and shared across every outer
+        combination, so a per-value file mapping cannot be honoured. Unknown keys are
+        otherwise ignored, so without this the run would silently use the wrong
+        parameter set instead of failing.
+        """
+        if isinstance(data, dict):
+            for idx, block in enumerate(data.get("outer_loops") or []):
+                if isinstance(block, dict) and "inner_files" in block:
+                    raise ValueError(
+                        f"outer_loops[{idx}] uses 'inner_files', which is no longer supported. "
+                        "Inner loop values are shared across all outer combinations; use a "
+                        "separate config per inner file if they need to differ."
+                    )
+        return data
 
     @property
     def mode_info(self) -> Tuple[bool, int]:
@@ -191,6 +339,21 @@ class AppConfig(BaseModel):
     def is_loop_mode(self) -> bool:
         """Helper property to check if loop mode is active."""
         return self.mode_info[0]
+
+    @model_validator(mode="after")
+    def validate_multithreading_level(self) -> "AppConfig":
+        """Checks that one run actually fits inside the requested allocation."""
+        level = self.execution.multithreading_level
+        if level is None:
+            return self
+
+        cpus = get_slurm_cpus_per_task(self.slurm)
+        if cpus is not None and level > cpus:
+            raise ValueError(
+                f"execution.multithreading_level ({level}) exceeds slurm 'cpus-per-task' "
+                f"({cpus}); a single run would not fit in the allocation."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_mode_integrity(self) -> "AppConfig":

@@ -1,19 +1,19 @@
 {
   "slurm": {
     "account": "lappi",
-    "job-name": "dipLO_HERA",
-    "partition": "small",
+    "job-name": "dip_HERA",
+    "partition": "test",
     "nodes": 1,
     "ntasks": 1,
-    "time": "03:59:00",
+    "time": "00:06:00",
     "cpus-per-task": 32,
-    "mem": "20G",
+    "mem": "10G",
     "output": "slurm_%j.log"
   },
   "execution": {
     "multithreading_level": 1,
     "interpreter": "julia",
-    "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dipLO/sf_lo_pdgm_dip_T.jl",
+    "executable": "/projappl/lappi/abhiram/LO_Diffraction/sf_lo_L.jl",
     "modules": [
       "openmpi",
       "julia/1.11.9",
@@ -24,8 +24,8 @@
     }
   },
   "experiment": {
-    "result_database_path": "/scratch/lappi/abhiram/dipLO_database",
-    "experiment_name": "kcbk_median_mvgam_pd",
+    "result_database_path": "/scratch/lappi/abhiram/LO_database",
+    "experiment_name": "MVe_rep0",
     "slrm_output_dir": "SLURM_OUTPUT",
     "tracking_args": {
          "save_dir": "{save_dir}_{__indicator}",
@@ -38,7 +38,7 @@
     "arg_names": ["--Q", "beta", "--x"]
   },
   "args": {
-    "dipole_path": "/projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/bk_median.dat",
+    "dipole_path": "/projappl/lappi/abhiram/bayesian_alldata/LO_MVe/bks/0.dat",
     "xmax": 160.0
   }
 }
