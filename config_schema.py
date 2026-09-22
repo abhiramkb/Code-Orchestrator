@@ -52,9 +52,33 @@ class RangeLoop(BaseModel):
 
 class TabularArgSpec(BaseModel):
     arg_name: str
-    column: int
+    # 'column' takes the value from a column of the row. 'row_index' takes the row's
+    # position among retained rows instead, so comment and blank lines do not advance
+    # it: with a 4-line header, the first data row is index 0.
+    source: Literal["column", "row_index"] = "column"
+    column: Optional[int] = None
+    index_offset: int = 0  # Added to the row index, e.g. 1 for one-based numbering
     template: Optional[str] = None
     transform: Optional[str] = None  # e.g., "10^x", "10**x", "log10", "exp"
+
+    @model_validator(mode="after")
+    def check_source_fields(self) -> "TabularArgSpec":
+        """Keeps the two sources mutually exclusive instead of silently ignoring
+        whichever field does not apply to the chosen source."""
+        if self.source == "column":
+            if self.column is None:
+                raise ValueError(
+                    f"'{self.arg_name}': 'column' is required unless 'source' is 'row_index'."
+                )
+            if self.index_offset:
+                raise ValueError(
+                    f"'{self.arg_name}': 'index_offset' only applies to source 'row_index'."
+                )
+        elif self.column is not None:
+            raise ValueError(
+                f"'{self.arg_name}': 'column' cannot be combined with source 'row_index'."
+            )
+        return self
 
 
 class TabularOuterLoop(BaseModel):

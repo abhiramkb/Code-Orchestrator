@@ -128,9 +128,35 @@ An array of blocks; the run expands over their Cartesian product. Each block **m
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `arg_name` | String | Argument name. Bare names gain `--` (or `-` if single character); names already starting with `-` are passed through unchanged. |
-| `column` | Integer | Zero-based column index. |
+| `source` | String | Where the value comes from: `column` (default) reads a column of the row, `row_index` uses the row's own position. |
+| `column` | Integer | Zero-based column index. Required for `source: column`, and rejected for `source: row_index`. |
+| `index_offset` | Integer | Only for `source: row_index`. Added to the index, e.g. `1` for one-based numbering. Default `0`. |
 | `transform` | String | Optional math expression applied to the value, e.g. `"10^x"`, `"log10(x)"`, `"sqrt(x)"`. `x` and `val` both refer to the raw value; `^` means exponentiation. Standard `math` functions plus SciPy special functions (Bessel, gamma, …) are available when SciPy is installed. |
 | `template` | String | Optional string template applied after `transform`, e.g. `"/data/bks/{val}.dat"`. |
+
+#### Numbering rows instead of reading them
+
+Some data files carry no index column even though each row corresponds to a numbered file. `source: row_index` supplies that number:
+
+```yaml
+inner_loop:
+  type: tabular_file
+  file_path: /projappl/lappi/abhiram/bayesian_alldata/LO_MVe/posteriorsamples.dat
+  delimiter: " "
+  comment_prefix: "#"
+  args:
+    - arg_name: dipole_path
+      source: row_index
+      template: /projappl/lappi/abhiram/bayesian_alldata/LO_MVe/bks/{val}.dat
+    - arg_name: Csq
+      column: 2
+```
+
+The index counts **retained rows**, so comment and blank lines do not advance it: in a file with a four-line header, the first data row is index `0` and maps to `bks/0.dat`.
+
+The value stays an integer until `template` is applied, so a format spec works for zero-padded names — `"bks/{val:03d}.dat"` gives `bks/000.dat`. Use `index_offset: 1` for one-based files.
+
+> Because the index counts retained rows, changing `comment_prefix` or `skip_blank_lines` renumbers them. That changes the generated arguments and therefore the checkpoint hashes, so completed work under the old settings will not be recognised.
 
 ### `experiment`
 

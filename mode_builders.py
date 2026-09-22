@@ -1,7 +1,7 @@
 from pathlib import Path
 import itertools
 from textwrap import indent
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from arg_transform import _apply_transform
 from utils import format_cli_args, strip_hyphens
 
@@ -478,6 +478,55 @@ print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 wait
 """
 
+def _evaluate_tabular_rows(block: Union[TabularInnerLoop, TabularOuterLoop]) -> List[Dict[str, Any]]:
+    """Expands a tabular loop block into one argument dictionary per retained row.
+
+    Shared by the inner and outer evaluators, which describe their data files with the
+    same set of attributes.
+
+    Rows filtered out as comments or blank lines do not advance the row index, so a
+    'row_index' argument numbers the data rows themselves rather than file lines.
+    """
+    rows: List[Dict[str, Any]] = []
+
+    with open(block.file_path, "r", encoding="utf-8") as f:
+        row_index = 0
+        for line in f:
+            line_str = line.strip()
+            if block.skip_blank_lines and not line_str:
+                continue
+            if block.comment_prefix and line_str.startswith(block.comment_prefix):
+                continue
+
+            if block.delimiter and block.delimiter != " ":
+                cols = [c.strip() for c in line_str.split(block.delimiter)]
+            else:
+                cols = line_str.split()
+
+            row_dict = {}
+            for arg_spec in block.args:
+                if arg_spec.source == "row_index":
+                    # Left as an int so templates may apply a format spec, e.g. '{val:03d}'
+                    val = row_index + arg_spec.index_offset
+                else:
+                    val = cols[arg_spec.column]
+
+                # 1. Apply numeric transformation if requested
+                if arg_spec.transform:
+                    val = _apply_transform(val, arg_spec.transform)
+
+                # 2. Apply string template if defined
+                if arg_spec.template:
+                    val = arg_spec.template.format(val=val)
+
+                row_dict[arg_spec.arg_name] = val
+
+            rows.append(row_dict)
+            row_index += 1
+
+    return rows
+
+
 def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
     """Evaluates a typed inner loop into argument dictionaries."""
     if isinstance(loop, ExplicitLoop):
@@ -499,37 +548,7 @@ def _evaluate_inner_loop(loop: InnerLoop) -> List[Dict[str, Any]]:
         return [{arg_name: val} for val in values]
 
     elif isinstance(loop, TabularInnerLoop):
-        file_path = loop.file_path
-        rows = []
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line_str = line.strip()
-                if loop.skip_blank_lines and not line_str:
-                    continue
-                if loop.comment_prefix and line_str.startswith(loop.comment_prefix):
-                    continue
-
-                if loop.delimiter and loop.delimiter != " ":
-                    cols = [c.strip() for c in line_str.split(loop.delimiter)]
-                else:
-                    cols = line_str.split()
-
-                row_dict = {}
-                for arg_spec in loop.args:
-                    val = cols[arg_spec.column]
-
-                    # 1. Apply numeric transformation if requested
-                    if arg_spec.transform:
-                        val = _apply_transform(val, arg_spec.transform)
-
-                    # 2. Apply string template if defined
-                    if arg_spec.template:
-                        val = arg_spec.template.format(val=val)
-
-                    row_dict[arg_spec.arg_name] = val
-
-                rows.append(row_dict)
-        return rows
+        return _evaluate_tabular_rows(loop)
 
     raise ValueError(f"Unsupported inner_loop type: '{type(loop)}'")
 
@@ -608,36 +627,7 @@ def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
         return [{arg_name: val} for val in values]
 
     elif isinstance(block, TabularOuterLoop):
-        rows = []
-        with open(block.file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line_str = line.strip()
-                if block.skip_blank_lines and not line_str:
-                    continue
-                if block.comment_prefix and line_str.startswith(block.comment_prefix):
-                    continue
-
-                if block.delimiter and block.delimiter != " ":
-                    cols = [c.strip() for c in line_str.split(block.delimiter)]
-                else:
-                    cols = line_str.split()
-
-                row_dict = {}
-                for arg_spec in block.args:
-                    val = cols[arg_spec.column]
-
-                    # 1. Apply numeric transformation if requested
-                    if arg_spec.transform:
-                        val = _apply_transform(val, arg_spec.transform)
-
-                    # 2. Apply string template if defined
-                    if arg_spec.template:
-                        val = arg_spec.template.format(val=val)
-
-                    row_dict[arg_spec.arg_name] = val
-
-                rows.append(row_dict)
-        return rows
+        return _evaluate_tabular_rows(block)
 
     raise ValueError(f"Unsupported outer_loop block type: '{type(block)}'")
 

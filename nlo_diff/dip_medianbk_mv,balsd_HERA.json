@@ -6,11 +6,12 @@
     "nodes": 1,
     "ntasks": 1,
     "time": "23:59:00",
-    "cpus-per-task": 16,
-    "mem": "10G",
+    "cpus-per-task": 192,
+    "mem": "80G",
     "output": "slurm_%j.log"
   },
   "execution": {
+    "multithreading_level": 16,
     "interpreter": "julia",
     "executable": "/projappl/lappi/abhiram/NLO_Diffraction_dip-dip/sf_nlo_sdaw_dip_L.jl",
     "modules": [
@@ -19,7 +20,7 @@
       "julia-mpi"
     ],
     "env_vars": {
-      "JULIA_NUM_THREADS": "$SLURM_CPUS_PER_TASK"
+      "JULIA_NUM_THREADS": "$MULTITHREADING_LEVEL"
     }
   },
   "experiment": {
