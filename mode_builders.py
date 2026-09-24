@@ -489,13 +489,22 @@ def _evaluate_tabular_rows(block: Union[TabularInnerLoop, TabularOuterLoop]) -> 
     """
     rows: List[Dict[str, Any]] = []
 
+    # str.startswith() accepts a tuple of prefixes natively, so a single string and a
+    # list of strings both normalize to the same check. Empty entries are dropped rather
+    # than kept, since every line starts with "" and comment_prefix: "" is how comment
+    # skipping is disabled.
+    raw_prefixes = (
+        (block.comment_prefix,) if isinstance(block.comment_prefix, str) else tuple(block.comment_prefix)
+    )
+    comment_prefixes = tuple(p for p in raw_prefixes if p)
+
     with open(block.file_path, "r", encoding="utf-8") as f:
         row_index = 0
         for line in f:
             line_str = line.strip()
             if block.skip_blank_lines and not line_str:
                 continue
-            if block.comment_prefix and line_str.startswith(block.comment_prefix):
+            if comment_prefixes and line_str.startswith(comment_prefixes):
                 continue
 
             if block.delimiter and block.delimiter != " ":

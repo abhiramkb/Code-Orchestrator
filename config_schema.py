@@ -86,7 +86,7 @@ class TabularOuterLoop(BaseModel):
     file_path: Path
     args: List[TabularArgSpec]
     delimiter: Optional[str] = None
-    comment_prefix: str = "#"
+    comment_prefix: Union[str, List[str]] = "#"  # a single prefix, or several, e.g. ["#", "*", "!"]
     skip_blank_lines: bool = True
 
     @field_validator("file_path")
@@ -218,7 +218,7 @@ class TabularInnerLoop(BaseModel):
     type: Literal["tabular_file"]
     file_path: Optional[Path] = None
     delimiter: str = Field(default=" ")
-    comment_prefix: str = "#"
+    comment_prefix: Union[str, List[str]] = "#"  # a single prefix, or several, e.g. ["#", "*", "!"]
     args: List[TabularArgSpec] = []
     arg_names: Optional[List[str]] = None # Simpler specification for arg names without column mapping
     skip_blank_lines: bool = True

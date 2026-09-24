@@ -103,7 +103,7 @@ Two forms, selected by `type`. A dict with no `type` is treated as `tabular_file
 | :--- | :--- | :--- | :--- |
 | `file_path` | Path | `null` | Data file to read. |
 | `delimiter` | String | `" "` | Column separator; whitespace splitting when a single space. |
-| `comment_prefix` | String | `"#"` | Lines starting with this are skipped. |
+| `comment_prefix` | String or Array | `"#"` | Lines starting with this are skipped. Give a list, e.g. `["#", "*", "!"]`, to skip lines starting with any of several prefixes. `""` (or `[]`) disables comment skipping entirely. |
 | `skip_blank_lines` | Boolean | `true` | Skip empty lines. |
 | `arg_names` | Array | `null` | Shorthand: maps columns positionally to argument names. |
 | `args` | Array | `[]` | Explicit column specs; use instead of `arg_names` when you need `template` or `transform`. |

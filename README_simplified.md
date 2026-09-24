@@ -141,6 +141,12 @@ outer_loops:
 100 replicas × 51 points = 100 array tasks of 51 runs each. Remember to drop `dipole_path`
 and `Csq` from `args` — they come from the table now.
 
+**File has more than one kind of metadata line?** `comment_prefix` also takes a list:
+
+```yaml
+    comment_prefix: ["#", "*", "!"]     # skip lines starting with any of these
+```
+
 **Column specs, in short:**
 
 | Field | Meaning |
