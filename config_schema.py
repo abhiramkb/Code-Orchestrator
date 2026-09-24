@@ -1,5 +1,6 @@
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Tuple, Literal, Optional, Union
 from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, computed_field, field_validator, model_validator
@@ -31,7 +32,26 @@ def determine_loop_q(cfg: dict) -> bool:
         mode_index = 2
 
     return True, mode_index
-        
+
+
+# --- 0. Dataset Processing Model ---
+
+class ProcessConfig(BaseModel):
+    """Renaming and row-filtering rules applied to a combined dataset.
+
+    Global only: every 'outer_loops' source is concatenated row-wise into one table,
+    so one naming/filtering scheme applies uniformly to the result, not per source.
+    """
+    column_names: Optional[List[str]] = None  # Renames the extracted columns positionally
+    cuts: List[str] = Field(default_factory=list)  # E.g. ["Q < 10", "status == 'VALID'"]
+
+    @field_validator("cuts", mode="before")
+    @classmethod
+    def normalize_cuts(cls, v: Any) -> List[str]:
+        """Accepts either a single string or a list of strings for cuts."""
+        if isinstance(v, str):
+            return [v]
+        return v or []
 
 
 # --- 1. Outer Loop Polymorphic Models ---
@@ -289,12 +309,20 @@ class ExperimentConfig(BaseModel):
 
 class AppConfig(BaseModel):
     loopQ: Optional[bool] = None  # Optional explicit flag from config JSON
-    execution: ExecutionConfig
-    slurm: SlurmConfig
+    # Required for the SLURM sweep modes; absent (and ignored if given) for
+    # process_datasets mode, which submits no job.
+    execution: Optional[ExecutionConfig] = None
+    slurm: Optional[SlurmConfig] = None
     inner_loop: Optional[InnerLoop] = None
     outer_loops: List[OuterLoopBlock] = []
     experiment: Optional[ExperimentConfig] = None
     args: Dict[str, Any] = {}
+
+    # --- Dataset processing mode: combines 'outer_loops' tabular sources row-wise
+    # into one table instead of generating a SLURM sweep. See validate_dataset_processing_rules.
+    process_datasets: bool = False
+    output_file_path: Optional[Path] = None  # Where the combined table is written
+    process: Optional[ProcessConfig] = None  # Renaming/cuts applied to the combined table
 
     @model_validator(mode="before")
     @classmethod
@@ -365,8 +393,66 @@ class AppConfig(BaseModel):
         return self.mode_info[0]
 
     @model_validator(mode="after")
+    def validate_dataset_processing_rules(self) -> "AppConfig":
+        """Validates the dataset-processing mode, and requires execution/slurm otherwise."""
+        if self.process_datasets:
+            ignored = [
+                name for name, val in (("execution", self.execution), ("slurm", self.slurm),
+                                        ("experiment", self.experiment))
+                if val is not None
+            ]
+            if ignored:
+                warnings.warn(
+                    f"'process_datasets' is True; the following section(s) are ignored: "
+                    f"{', '.join(ignored)}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            if not self.outer_loops:
+                raise ValueError("'process_datasets' mode requires at least one entry in 'outer_loops'.")
+
+            tabular_blocks: List[TabularOuterLoop] = []
+            for idx, block in enumerate(self.outer_loops):
+                if not isinstance(block, TabularOuterLoop):
+                    raise ValueError(
+                        f"outer_loops[{idx}] must be of type 'tabular_file' when 'process_datasets' is True."
+                    )
+                tabular_blocks.append(block)
+
+            # Every source must extract the same number of columns: they concatenate
+            # row-wise into one table, so their columns must line up positionally.
+            first_num_args = len(tabular_blocks[0].args)
+            for idx, block in enumerate(tabular_blocks[1:], start=1):
+                if len(block.args) != first_num_args:
+                    raise ValueError(
+                        f"Column count mismatch in 'process_datasets' mode: outer_loops[0] selects "
+                        f"{first_num_args} columns, but outer_loops[{idx}] selects {len(block.args)}. "
+                        "All sources must select the same number of columns to be combined."
+                    )
+
+            if not self.output_file_path:
+                raise ValueError("'process_datasets' mode requires 'output_file_path'.")
+
+            if self.process and self.process.column_names:
+                if len(self.process.column_names) != first_num_args:
+                    raise ValueError(
+                        f"Number of 'process.column_names' ({len(self.process.column_names)}) does not "
+                        f"match the number of extracted columns ({first_num_args})."
+                    )
+        else:
+            if self.execution is None:
+                raise ValueError("Missing 'execution' configuration block.")
+            if self.slurm is None:
+                raise ValueError("Missing 'slurm' configuration block.")
+
+        return self
+
+    @model_validator(mode="after")
     def validate_multithreading_level(self) -> "AppConfig":
-        """Checks that one run actually fits inside the requested allocation."""
+        """Checks that one run actually fits inside the requested allocation (sweep modes only)."""
+        if self.process_datasets:
+            return self
         level = self.execution.multithreading_level
         if level is None:
             return self
@@ -381,7 +467,10 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode_integrity(self) -> "AppConfig":
-        """Enforces rules based on determined mode_index."""
+        """Enforces rules based on determined mode_index (sweep modes only)."""
+        if self.process_datasets:
+            return self
+
         is_loop, mode = self.mode_info
 
         if is_loop:
@@ -391,7 +480,7 @@ class AppConfig(BaseModel):
             # Single run mode
             if self.inner_loop is not None:
                 raise ValueError("'inner_loop' should not be present when loop mode is disabled.")
-            
+
         return self
 
 

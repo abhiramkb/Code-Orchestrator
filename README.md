@@ -103,7 +103,7 @@ Two forms, selected by `type`. A dict with no `type` is treated as `tabular_file
 | :--- | :--- | :--- | :--- |
 | `file_path` | Path | `null` | Data file to read. |
 | `delimiter` | String | `" "` | Column separator; whitespace splitting when a single space. |
-| `comment_prefix` | String or Array | `"#"` | Lines starting with this are skipped. Give a list, e.g. `["#", "*", "!"]`, to skip lines starting with any of several prefixes. `""` (or `[]`) disables comment skipping entirely. |
+| `comment_prefix` | String or Array | `"#"` | Lines starting with this are skipped. Give a list, e.g. `["#", "*", "!"]`, to skip lines starting with any of several prefixes. `""` (or `[]`) disables comment skipping entirely. Each line is stripped of leading/trailing whitespace *before* this check, so an indented header line is matched by its first non-space character, not by the indentation. |
 | `skip_blank_lines` | Boolean | `true` | Skip empty lines. |
 | `arg_names` | Array | `null` | Shorthand: maps columns positionally to argument names. |
 | `args` | Array | `[]` | Explicit column specs; use instead of `arg_names` when you need `template` or `transform`. |
@@ -415,6 +415,46 @@ Completion is checked twice, for different reasons:
 To resume an interrupted campaign, simply re-run the orchestrator on the same config: completed points are skipped and only the remainder is submitted.
 
 Deleting a marker forces the corresponding run to repeat; deleting the `checkpoints/` directory restarts the whole campaign.
+
+---
+
+## Dataset Processing Mode
+
+`process_datasets: true` switches a config from generating a SLURM script to a synchronous, local operation: it reads one or more tabular data files, extracts and renames chosen columns, concatenates them row-wise into one table, optionally filters rows, and writes the result — no `execution`, `slurm`, `inner_loop`, checkpointing or submission involved. It runs directly when the config is passed to `orchestrator.py`, the same way `--collect` does.
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `process_datasets` | Boolean | Enables this mode. `execution`/`slurm`/`experiment` are not required, and a warning is printed if any are supplied anyway, since they're ignored. |
+| `output_file_path` | Path | **Required.** Where the combined table is written, as CSV. |
+| `outer_loops` | Array | **Required, at least one entry.** Every entry must be `type: tabular_file` (the same schema used in sweep mode — `file_path`, `args`, `delimiter`, `comment_prefix`, `skip_blank_lines`). Each entry contributes its extracted rows to the combined table. All entries must select the same number of columns, since their rows stack into one table. |
+| `process.column_names` | Array | Renames the extracted columns positionally, e.g. the 1st column selected by every source becomes this list's 1st name. Its length must match the column count. Omit to keep each source's own `arg_name`s — only sensible when every source already uses the same names. |
+| `process.cuts` | String or Array | One or more boolean expressions; a row is kept only if every cut is true. Evaluated with each of the row's (renamed) columns bound by name, plus the same math functions available to `transform` (`sqrt`, `log10`, SciPy special functions, …). Numeric-looking values are compared numerically; anything else compares as a string. |
+
+```yaml
+process_datasets: true
+output_file_path: combined_posteriors.csv
+
+process:
+  column_names: [Qs0sq, Csq]
+  cuts:
+    - "Qs0sq < 0.1"
+
+outer_loops:
+  - type: tabular_file
+    file_path: /projappl/lappi/abhiram/bayesian_alldata/LO_MVe/posteriorsamples.dat
+    delimiter: " "
+    args:
+      - {arg_name: Q, column: 0}
+      - {arg_name: C2, column: 2}
+  - type: tabular_file
+    file_path: /projappl/lappi/abhiram/bayesian_alldata/KCBK_pd_MVgamma/posteriorsamples.dat
+    delimiter: ","
+    args:
+      - {arg_name: Q, column: 1}
+      - {arg_name: C2, column: 3, transform: "10**x"}   # this file stores log10(C^2)
+```
+
+Each source can use its own `arg_name`s, column order, delimiter and even a `transform` to normalize units before the tables are stacked — only the final column *count* and the shared `column_names` need to agree.
 
 ---
 

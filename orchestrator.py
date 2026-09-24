@@ -1,3 +1,4 @@
+import csv
 import json
 import yaml
 from datetime import datetime
@@ -20,7 +21,10 @@ from config_schema import (
 )
 
 # Required for constructing mode-specific portion of SLURM scripts
-from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode
+from mode_builders import build_single_mode, build_inner_loop_mode, build_job_array_mode, _evaluate_tabular_rows
+
+# Required for evaluating process_datasets 'cuts' expressions
+from arg_transform import _evaluate_cut
 
 # Utilities
 from utils import format_cli_args
@@ -699,6 +703,47 @@ def submit_slurm_script(
         discard_backup_dir(backup_dir)
         sys.exit(1)
 
+def process_datasets(config: AppConfig) -> None:
+    """Combines every 'outer_loops' tabular source into one row-wise concatenated table.
+
+    Each source's columns are extracted in its declared 'args' order (validated to match
+    in count across all sources), the sources are concatenated row-wise, then 'process'
+    optionally renames the columns and filters rows via 'cuts' before the result is
+    written to 'output_file_path' as CSV.
+    """
+    combined_rows: List[Dict[str, Any]] = []
+    for block in config.outer_loops:
+        combined_rows.extend(_evaluate_tabular_rows(block))
+    print(f"[INFO] Extracted {len(combined_rows)} row(s) from {len(config.outer_loops)} source(s).")
+
+    process_cfg = config.process
+    column_names = process_cfg.column_names if process_cfg else None
+    if column_names:
+        # Positional rename: schema validation already guarantees every row has exactly
+        # len(column_names) values, since all sources were required to select the same
+        # column count.
+        combined_rows = [dict(zip(column_names, row.values())) for row in combined_rows]
+
+    if process_cfg and process_cfg.cuts:
+        before = len(combined_rows)
+        combined_rows = [
+            row for row in combined_rows
+            if all(_evaluate_cut(expr, row) for expr in process_cfg.cuts)
+        ]
+        print(f"[INFO] Cuts kept {len(combined_rows)}/{before} row(s).")
+
+    output_path = config.output_file_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = column_names or (list(combined_rows[0].keys()) if combined_rows else [])
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(combined_rows)
+
+    print(f"[SUCCESS] Wrote {len(combined_rows)} row(s) to '{output_path}'.")
+
+
 # Collection function from https://share.gemini.google/ldX5zTud8zOv, https://share.gemini.google/IEM7GOQgmFCx
 # Note that this function is specific to the NLODiffraction project. A more general collection function needs
 # to be developed.
@@ -950,6 +995,15 @@ if __name__ == "__main__":
             continue
         if args.collect_job is not None:
             collect_slurm_results_to_db(config_path, job_id=args.collect_job)
+            continue
+
+        # Dataset processing is not a SLURM sweep mode: check the raw config for the
+        # flag first, so a normal sweep config isn't validated twice (once here, once
+        # inside generate_slurm_script).
+        raw_cfg = get_dict_from_config_file(config_path)
+        if raw_cfg.get("process_datasets"):
+            config = validate_config(raw_cfg, config_path, args.dryrun)
+            process_datasets(config)
             continue
 
         generated_script, backup_dir = generate_slurm_script(

@@ -1,4 +1,5 @@
 import math
+from typing import Any, Dict
 
 # 1. Base Python math namespace
 SAFE_MATH_NAMESPACE = {
@@ -107,3 +108,38 @@ def _apply_transform(raw_val: str, transform: str) -> str:
     if isinstance(res, (float, int)):
         return f"{res:.10g}"
     return str(res)
+
+
+def _coerce_numeric(val: Any) -> Any:
+    """Converts a raw string value to float when possible, otherwise leaves it as-is.
+
+    Used to let cut expressions compare numeric columns numerically without requiring
+    a 'transform' on every column just to cast it.
+    """
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return val
+
+
+def _evaluate_cut(expr: str, row: Dict[str, Any]) -> bool:
+    """Evaluates a boolean cut expression against one row's named column values.
+
+    Shares SAFE_MATH_NAMESPACE with _apply_transform, but binds every column in `row`
+    by name instead of a single 'val'/'x', and does not force values to float, so a
+    cut may compare a string-valued column directly (e.g. "status == 'VALID'").
+    Numeric-looking values are coerced with _coerce_numeric first, so a cut can also
+    write plain numeric comparisons (e.g. "Q < 10") without an explicit cast.
+    """
+    eval_namespace = {
+        "__builtins__": None,
+        **SAFE_MATH_NAMESPACE,
+        **{k: _coerce_numeric(v) for k, v in row.items()},
+    }
+
+    try:
+        result = eval(expr, eval_namespace)
+    except Exception as e:
+        raise ValueError(f"Failed to evaluate cut expression '{expr}' on row {row}: {e}") from e
+
+    return bool(result)
