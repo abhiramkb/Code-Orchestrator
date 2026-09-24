@@ -5,8 +5,8 @@ slurm:
   nodes: 1
   ntasks: 1
   time: 00:15:00
-  cpus-per-task: 64
-  mem: 40G
+  cpus-per-task: 128
+  mem: 240G
   output: slurm_%j.log
 
 execution:
@@ -37,4 +37,5 @@ inner_loop:
         column: 2
 
 args:
-  th_points: 40
+  th_points: 80
+  cmp_rmin: 1e-6
