@@ -483,6 +483,16 @@ def generate_slurm_script(
     # 1. Validate & convert raw dict to typed AppConfig object
     config: AppConfig = validate_config(cfg, config_path, dryrunQ)
     print(f"[SUCCESS] Config validation passed for '{config_path}'.")
+
+    if config.process_datasets:
+        print(
+            f"[ERROR] '{config_path}' has 'process_datasets: true'. Use the 'process' "
+            "subcommand instead of 'generate' (or the bare invocation, which defaults "
+            "to 'generate').",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     warn_about_concurrency(config)
     if checktimeQ:
         validate_partition_time_limit(config)
@@ -703,14 +713,25 @@ def submit_slurm_script(
         discard_backup_dir(backup_dir)
         sys.exit(1)
 
-def process_datasets(config: AppConfig) -> None:
+def process_datasets(config_path: str) -> None:
     """Combines every 'outer_loops' tabular source into one row-wise concatenated table.
 
     Each source's columns are extracted in its declared 'args' order (validated to match
     in count across all sources), the sources are concatenated row-wise, then 'process'
     optionally renames the columns and filters rows via 'cuts' before the result is
     written to 'output_file_path' as CSV.
+
+    Unlike 'generate', this mode has no --dryrun: producing the combined table is the
+    entire point of running it, and doing so always requires the source files to exist,
+    so file-existence checks are never skipped.
+
+    Args:
+        config_path: Path to the orchestrator config file.
     """
+    cfg = get_dict_from_config_file(config_path)
+    config: AppConfig = validate_config(cfg, config_path, dryrunQ=False)
+    print(f"[SUCCESS] Config validation passed for '{config_path}'.")
+
     combined_rows: List[Dict[str, Any]] = []
     for block in config.outer_loops:
         combined_rows.extend(_evaluate_tabular_rows(block))
@@ -945,80 +966,105 @@ def collect_slurm_results_to_db(config_path: str, job_id: Optional[str]=None) ->
         f"Successfully written {len(rows_to_insert)} run(s) to database: {db_file_path}"
     )
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate and submit SLURM scripts from a JSON config.")
-    parser.add_argument(
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Builds the two-tier CLI: a subcommand selects the mode, and each subcommand
+    owns its own flags, so e.g. '--job-id' cannot be passed to 'generate' and
+    '--submit' cannot be passed to 'collect'.
+    """
+    # Shared by every subcommand, defined once via a parent parser.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "config_paths",
         nargs="*",
         default=["config.json"],
-        help="Path to the JSON configuration file(s) (default: config.json)"
+        help="Path to the JSON/YAML configuration file(s) (default: config.json)"
     )
-    parser.add_argument(
-        "--submit",
-        action="store_true",
+
+    parser = argparse.ArgumentParser(
+        description="Generate and submit SLURM scripts, collect their results, or "
+                     "combine tabular datasets, from JSON/YAML config files."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    generate = subparsers.add_parser(
+        "generate", parents=[common],
+        help="Generate (and optionally submit) a SLURM script from a config. Default when no subcommand is given."
+    )
+    generate.add_argument(
+        "--submit", action="store_true",
         help="Automatically submit the generated script to SLURM."
     )
-    parser.add_argument(
-        "--dryrun",
-        action="store_true",
-        help="Dry run."
+    generate.add_argument(
+        "--dryrun", action="store_true",
+        help="Generate without touching SLURM; also relaxes file-existence checks."
     )
-    parser.add_argument(
-        "--noargcheck",
-        action="store_true",
+    generate.add_argument(
+        "--noargcheck", action="store_true",
         help="Disable checking of whether args passed to the executable are supported."
     )
-    parser.add_argument(
-        "--notimecheck",
-        action="store_true",
+    generate.add_argument(
+        "--notimecheck", action="store_true",
         help="Disable checking the requested time limit against the partition's MaxTime."
     )
-    parser.add_argument(
-        "--collect",
-        action="store_true",
-        help="Collects results from finished SLURM jobs."
+
+    collect = subparsers.add_parser(
+        "collect", parents=[common],
+        help="Collect results from finished SLURM jobs into a SQLite database."
     )
-    parser.add_argument(
-            "--collect-job",
-            default=None,
-            help="Collects results from finished SLURM jobs."
-        )
-    args = parser.parse_args()
+    collect.add_argument(
+        "--job-id", default=None,
+        help="Collect only this job ID, into results_<id>.db, instead of every job into results.db."
+    )
 
-    checkargsQ = not args.noargcheck
+    subparsers.add_parser(
+        "process", parents=[common],
+        help="Combine the 'outer_loops' tabular sources into one row-wise concatenated CSV."
+    )
 
-    for config_path in args.config_paths:
-        print(f"\n--- Processing: {config_path} ---")
+    return parser
 
-        if args.collect:
-            collect_slurm_results_to_db(config_path)
-            continue
-        if args.collect_job is not None:
-            collect_slurm_results_to_db(config_path, job_id=args.collect_job)
-            continue
 
-        # Dataset processing is not a SLURM sweep mode: check the raw config for the
-        # flag first, so a normal sweep config isn't validated twice (once here, once
-        # inside generate_slurm_script).
-        raw_cfg = get_dict_from_config_file(config_path)
-        if raw_cfg.get("process_datasets"):
-            config = validate_config(raw_cfg, config_path, args.dryrun)
-            process_datasets(config)
-            continue
+if __name__ == "__main__":
+    # Backward compatibility: 'orchestrator.py my_config.json ...' (no subcommand) is
+    # still treated as 'generate', so existing invocations keep working unchanged.
+    # Only the exact absence of a recognized subcommand triggers this - an explicit
+    # 'generate'/'collect'/'process' (or '-h'/'--help') is left untouched.
+    _COMMANDS = ("generate", "collect", "process")
+    argv = sys.argv[1:]
+    if not argv or (argv[0] not in _COMMANDS and argv[0] not in ("-h", "--help")):
+        argv = ["generate"] + argv
 
-        generated_script, backup_dir = generate_slurm_script(
-            config_path, args.dryrun, checktimeQ=not args.notimecheck
-        )
+    args = build_arg_parser().parse_args(argv)
 
-        if generated_script is None:
-            print(f"[INFO] Nothing to submit for {config_path}: all tasks already checkpointed.")
-            continue
+    if args.command == "collect":
+        for config_path in args.config_paths:
+            print(f"\n--- Processing: {config_path} ---")
+            collect_slurm_results_to_db(config_path, job_id=args.job_id)
 
-        if args.dryrun:
-            print(f"[INFO] Dry-run: not submitting to SLURM for {config_path}.")
-        elif args.submit:
-            cfg = get_dict_from_config_file(config_path)
-            config: AppConfig = validate_config(cfg, config_path, args.dryrun)
-            submit_slurm_script(generated_script, config, checkargsQ, backup_dir)
-        else:
-            print(f"[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")
+    elif args.command == "process":
+        for config_path in args.config_paths:
+            print(f"\n--- Processing: {config_path} ---")
+            process_datasets(config_path)
+
+    else:  # generate
+        checkargsQ = not args.noargcheck
+
+        for config_path in args.config_paths:
+            print(f"\n--- Processing: {config_path} ---")
+
+            generated_script, backup_dir = generate_slurm_script(
+                config_path, args.dryrun, checktimeQ=not args.notimecheck
+            )
+
+            if generated_script is None:
+                print(f"[INFO] Nothing to submit for {config_path}: all tasks already checkpointed.")
+                continue
+
+            if args.dryrun:
+                print(f"[INFO] Dry-run: not submitting to SLURM for {config_path}.")
+            elif args.submit:
+                cfg = get_dict_from_config_file(config_path)
+                config: AppConfig = validate_config(cfg, config_path, args.dryrun)
+                submit_slurm_script(generated_script, config, checkargsQ, backup_dir)
+            else:
+                print(f"[TIP] Run 'sbatch {generated_script}' to manually submit, or pass --submit next time.")

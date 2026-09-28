@@ -21,23 +21,27 @@ Two useful facts up front:
 
 ## The only commands you need
 
+A subcommand comes first and picks the mode; its flags only exist under that subcommand.
+`generate` is also the default, so leaving it off still works.
+
 ```bash
 cd /projappl/lappi/abhiram/Code-Orchestrator
 CFG="yaml_nlo_diff/dip_medianbk_mvgam,balsd_HERA.yaml"
 
-python3 orchestrator.py "$CFG"            # write the script, don't submit
-python3 orchestrator.py "$CFG" --submit   # write it and sbatch it
-python3 orchestrator.py "$CFG" --collect  # gather finished results into results.db
+python3 orchestrator.py "$CFG"                     # (generate) write the script, don't submit
+python3 orchestrator.py generate "$CFG" --submit   # write it and sbatch it
+python3 orchestrator.py collect "$CFG"             # gather finished results into results.db
 ```
 
-| Flag | Use it when |
-| :--- | :--- |
-| `--submit` | You want it queued now. Without this you just get the `.sh` to inspect or `sbatch` yourself. |
-| `--dryrun` | You want to see the generated script without touching SLURM (also skips "does this file exist" checks). |
-| `--noargcheck` | Startup complains your executable doesn't support a flag, but you know it does. |
-| `--notimecheck` | You don't want `time` validated against the partition's `MaxTime`. |
-| `--collect` | Jobs are done and you want `results.db`. |
-| `--collect-job 12345678` | Same, one job only → `results_12345678.db`. |
+| Subcommand | Flag | Use it when |
+| :--- | :--- | :--- |
+| `generate` | `--submit` | You want it queued now. Without this you just get the `.sh` to inspect or `sbatch` yourself. |
+| `generate` | `--dryrun` | You want to see the generated script without touching SLURM (also skips "does this file exist" checks). |
+| `generate` | `--noargcheck` | Startup complains your executable doesn't support a flag, but you know it does. |
+| `generate` | `--notimecheck` | You don't want `time` validated against the partition's `MaxTime`. |
+| `collect` | *(none)* | Jobs are done and you want `results.db`. |
+| `collect` | `--job-id 12345678` | Same, one job only → `results_12345678.db`. |
+| `process` | *(none)* | Combining tabular datasets instead of running a sweep — see the full README. |
 
 ---
 
@@ -215,7 +219,7 @@ A current, working example of both: `yaml_nlo_diff/dip_kcbk_allbks_mvgam,pd_HERA
 ├── SLURM_OUTPUT/            # job logs (whatever you called slrm_output_dir)
 ├── checkpoints/             # "this run finished" markers
 ├── <job_id>_<indicator>/    # one output directory per run ($SAVE_DIR)
-└── results.db               # after --collect
+└── results.db               # after `collect`
 ```
 
 Log lines are tagged by run, so an array log stays readable:

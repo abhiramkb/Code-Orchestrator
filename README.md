@@ -14,33 +14,42 @@ Parameter expansion happens at generation time: every loop is unrolled into lite
 
 ## Command-Line Usage
 
+A subcommand selects the mode; each subcommand has its own flags, so e.g. `--submit` only exists under `generate` and `--job-id` only under `collect`.
+
 ```bash
 # Use the default configuration file (config.json)
-python3 orchestrator.py
+python3 orchestrator.py generate
 
 # One or more explicit config files
-python3 orchestrator.py nlo_diff/dip_medianbk_mv,balsd_HERA.json
-python3 orchestrator.py config_a.json config_b.yaml
+python3 orchestrator.py generate nlo_diff/dip_medianbk_mv,balsd_HERA.json
+python3 orchestrator.py generate config_a.json config_b.yaml
 
 # Generate and submit in one step
-python3 orchestrator.py my_config.json --submit
+python3 orchestrator.py generate my_config.json --submit
 
 # Generate without touching SLURM, and skip file-existence checks
-python3 orchestrator.py my_config.json --dryrun
+python3 orchestrator.py generate my_config.json --dryrun
 
 # Collect finished results into a SQLite database
-python3 orchestrator.py my_config.json --collect
-python3 orchestrator.py my_config.json --collect-job 12345678
+python3 orchestrator.py collect my_config.json
+python3 orchestrator.py collect my_config.json --job-id 12345678
+
+# Combine tabular datasets (process_datasets: true configs - see below)
+python3 orchestrator.py process my_dataset_config.json
 ```
 
-| Flag | Description |
-| :--- | :--- |
-| `--submit` | Submit the generated script with `sbatch`. |
-| `--dryrun` | Generate the script only; also relaxes file-existence validation. |
-| `--noargcheck` | Skip probing the executable's `--help` to verify that every configured flag is supported. |
-| `--notimecheck` | Skip checking the requested `time` against the partition's `MaxTime`. |
-| `--collect` | Parse SLURM logs and write all runs into `<exp_dir>/results.db`. |
-| `--collect-job <id>` | Same, restricted to one job ID, written to `<exp_dir>/results_<id>.db`. |
+`generate` is also the default when no subcommand is given at all, so `python3 orchestrator.py my_config.json` still works exactly as before.
+
+| Subcommand | Flag | Description |
+| :--- | :--- | :--- |
+| `generate` | `--submit` | Submit the generated script with `sbatch`. |
+| `generate` | `--dryrun` | Generate the script only; also relaxes file-existence validation. |
+| `generate` | `--noargcheck` | Skip probing the executable's `--help` to verify that every configured flag is supported. |
+| `generate` | `--notimecheck` | Skip checking the requested `time` against the partition's `MaxTime`. |
+| `collect` | `--job-id <id>` | Restrict collection to one job ID, written to `<exp_dir>/results_<id>.db` instead of `results.db`. |
+| `process` | *(none)* | Always writes the combined table; see [Dataset Processing Mode](#dataset-processing-mode). |
+
+Run `python3 orchestrator.py <subcommand> --help` for a subcommand's own flags.
 
 ## Execution Modes
 
@@ -174,7 +183,7 @@ This yields the layout:
 ├── <slrm_output_dir>/       # SLURM logs
 ├── checkpoints/             # completion markers
 ├── <job_id>_<indicator>/    # per-run output directories ($SAVE_DIR)
-└── results.db               # written by --collect
+└── results.db               # written by the 'collect' subcommand
 ```
 
 Without an `experiment` block, checkpoints go to `./checkpoints` relative to the submission directory and no result directories are created.
@@ -420,7 +429,7 @@ Deleting a marker forces the corresponding run to repeat; deleting the `checkpoi
 
 ## Dataset Processing Mode
 
-`process_datasets: true` switches a config from generating a SLURM script to a synchronous, local operation: it reads one or more tabular data files, extracts and renames chosen columns, concatenates them row-wise into one table, optionally filters rows, and writes the result — no `execution`, `slurm`, `inner_loop`, checkpointing or submission involved. It runs directly when the config is passed to `orchestrator.py`, the same way `--collect` does.
+`process_datasets: true` marks a config for the `process` subcommand rather than `generate`: it reads one or more tabular data files, extracts and renames chosen columns, concatenates them row-wise into one table, optionally filters rows, and writes the result — no `execution`, `slurm`, `inner_loop`, checkpointing or submission involved. Run it with `python3 orchestrator.py process my_config.json`; there is no `--dryrun` for this subcommand, since writing the combined table is the entire point of running it. Passing such a config to `generate` (or the bare, subcommand-less invocation, which defaults to `generate`) is a clear error telling you to use `process` instead.
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
@@ -460,7 +469,7 @@ Each source can use its own `arg_name`s, column order, delimiter and even a `tra
 
 ## Result Collection
 
-`--collect` scans the SLURM logs under `<result_database_path>/<experiment_name>/<slrm_output_dir>`, pairs each run with the `result*.json` file in its output directory, and writes a flattened row per run into `results.db`. Runs skipped via checkpoint are recorded with a `NULL` duration. Use `--collect-job <id>` to collect a single job into `results_<id>.db`.
+`python3 orchestrator.py collect my_config.json` scans the SLURM logs under `<result_database_path>/<experiment_name>/<slrm_output_dir>`, pairs each run with the `result*.json` file in its output directory, and writes a flattened row per run into `results.db`. Runs skipped via checkpoint are recorded with a `NULL` duration. Add `--job-id <id>` to collect a single job into `results_<id>.db` instead.
 
 > The collector currently assumes the NLO Diffraction project's output layout.
 
