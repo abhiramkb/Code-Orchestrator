@@ -48,6 +48,7 @@ inner_loop:
     - throughput
     - end_to_end
     - speed
+    - dipole
 
 args:
   max_log2_boxes: 20

@@ -47,3 +47,4 @@ inner_loop:
   values:
     - env
     - speed
+    - dipole
