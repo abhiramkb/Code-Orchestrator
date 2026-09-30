@@ -1,6 +1,6 @@
 # tfcubature benchmark suite on one GH200 node (H100 GPU + 72-core Grace CPU).
 #
-# Runs benchmarks/gpu_suite.py once per step, in order. Each step writes
+# Runs benchmarks/gpu_suite.sh once per step, in order. Each step writes
 # <step>.txt to $SAVE_DIR and has its own checkpoint, so resubmitting after a
 # timeout only reruns the steps that did not finish.
 #
@@ -24,10 +24,8 @@ slurm:
   output: slurm_%j.log
 
 execution:
-  interpreter: python
-  flags:
-    - -u
-  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.py
+  interpreter: bash
+  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.sh
   modules:
     - python-tensorflow
     - julia/1.11.9

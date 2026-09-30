@@ -2,9 +2,9 @@
 # thread per core against tfcubature on the same cores, on one full CPU node.
 # Compare with the 'speed' step of gpu_suite_gh200.yaml.
 #
-# Runs benchmarks/gpu_suite.py once per step; each step writes <step>.txt to
+# Runs benchmarks/gpu_suite.sh once per step; each step writes <step>.txt to
 # $SAVE_DIR and has its own checkpoint. Julia uses all allocated CPUs
-# (gpu_suite.py's default for --julia_threads).
+# (gpu_suite.sh's default for --julia_threads).
 #
 # One-time setup on a login node (the same as for gpu_suite_gh200.yaml):
 #   git clone https://github.com/abhiramkb/tfcubature.git /projappl/lappi/abhiram/tfcubature
@@ -26,10 +26,8 @@ slurm:
   output: slurm_%j.log
 
 execution:
-  interpreter: python
-  flags:
-    - -u
-  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.py
+  interpreter: bash
+  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.sh
   modules:
     - python-tensorflow/2.21
     - julia/1.11.9
