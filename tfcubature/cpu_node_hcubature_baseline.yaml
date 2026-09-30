@@ -1,0 +1,51 @@
+# CPU baseline for the tfcubature GPU benchmarks: HCubature.jl with one Julia
+# thread per core against tfcubature on the same cores, on one full CPU node.
+# Compare with the 'speed' step of gpu_suite_gh200.yaml.
+#
+# Runs benchmarks/gpu_suite.py once per step; each step writes <step>.txt to
+# $SAVE_DIR and has its own checkpoint. Julia uses all allocated CPUs
+# (gpu_suite.py's default for --julia_threads).
+#
+# One-time setup on a login node (the same as for gpu_suite_gh200.yaml):
+#   git clone https://github.com/abhiramkb/tfcubature.git /projappl/lappi/abhiram/tfcubature
+#   module load julia/1.11.9
+#   julia -e 'using Pkg; Pkg.add(["HCubature", "StaticArrays"])'
+#
+# Generate (and submit):
+#   python3 orchestrator.py generate tfcubature/cpu_node_hcubature_baseline.yaml --submit
+
+slurm:
+  account: lappi
+  job-name: tfcubature_cpu
+  partition: small
+  nodes: 1
+  ntasks: 1
+  time: "02:00:00"
+  cpus-per-task: 192
+  mem: 80G
+  output: slurm_%j.log
+
+execution:
+  interpreter: python
+  flags:
+    - -u
+  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.py
+  modules:
+    - python-tensorflow/2.21
+    - julia/1.11.9
+  env_vars:
+    TF_CPP_MIN_LOG_LEVEL: 2
+
+experiment:
+  result_database_path: /scratch/lappi/abhiram/tfcubature_benchmarks
+  experiment_name: cpu_node_baseline
+  slrm_output_dir: SLURM_OUTPUT
+  tracking_args:
+    save_dir: "{save_dir}"
+
+inner_loop:
+  type: explicit
+  arg_name: step
+  values:
+    - env
+    - speed

@@ -1,0 +1,56 @@
+# tfcubature benchmark suite on one GH200 node (H100 GPU + 72-core Grace CPU).
+#
+# Runs benchmarks/gpu_suite.py once per step, in order. Each step writes
+# <step>.txt to $SAVE_DIR and has its own checkpoint, so resubmitting after a
+# timeout only reruns the steps that did not finish.
+#
+# One-time setup on a login node:
+#   git clone https://github.com/abhiramkb/tfcubature.git /projappl/lappi/abhiram/tfcubature
+#   module load julia/1.11.9
+#   julia -e 'using Pkg; Pkg.add(["HCubature", "StaticArrays"])'
+#
+# Generate (and submit):
+#   python3 orchestrator.py generate tfcubature/gpu_suite_gh200.yaml --submit
+
+slurm:
+  account: lappi
+  job-name: tfcubature_gpu
+  partition: gpumedium
+  nodes: 1
+  ntasks: 1
+  time: "02:00:00"
+  cpus-per-task: 72
+  gres: gpu:gh200:1
+  output: slurm_%j.log
+
+execution:
+  interpreter: python
+  flags:
+    - -u
+  executable: /projappl/lappi/abhiram/tfcubature/benchmarks/gpu_suite.py
+  modules:
+    - python-tensorflow
+    - julia/1.11.9
+  env_vars:
+    TF_CPP_MIN_LOG_LEVEL: 2
+
+experiment:
+  result_database_path: /scratch/lappi/abhiram/tfcubature_benchmarks
+  experiment_name: gh200_suite
+  slrm_output_dir: SLURM_OUTPUT
+  tracking_args:
+    save_dir: "{save_dir}"
+
+inner_loop:
+  type: explicit
+  arg_name: step
+  values:
+    - env
+    - tests
+    - throughput
+    - end_to_end
+    - speed
+
+args:
+  max_log2_boxes: 20
+  num_integrals: 400
