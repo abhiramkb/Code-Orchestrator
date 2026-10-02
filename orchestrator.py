@@ -220,9 +220,17 @@ def build_common_header(
         if env_vars else "# No environment variables specified"
     )
 
+    # The disown is required: the script later uses bare `wait` (and `wait -n` in
+    # parallel mode) to flush its log pipes, and those also wait on any background
+    # process the preamble left running, e.g. a GPU monitor that the epilogue is
+    # meant to kill. The job would then hang until walltime. Disowned processes
+    # drop out of bash's job table but keep their PIDs, so `kill $PID` still works,
+    # and SLURM kills whatever is left when the script exits.
     preamble = exec_cfg.preamble
     preamble_block = (
-        "\n# User-Supplied Preamble\n" + preamble
+        "\n# User-Supplied Preamble\n" + preamble.rstrip("\n")
+        + "\n# Keep background processes started above from blocking the script's waits\n"
+        + "disown -a"
         if preamble else "# No preamble specified"
     )
 
