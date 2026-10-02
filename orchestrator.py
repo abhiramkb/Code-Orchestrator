@@ -281,6 +281,20 @@ print_args() {
 {print_args_def}"""
 
 
+def build_common_footer(exec_cfg: ExecutionConfig) -> str:
+    """Generates the user-supplied epilogue, appended after the last executable run.
+
+    Kept out of build_common_header: array mode rewrites the header line by line,
+    and the epilogue has to come after the mode-specific body anyway. The trailing
+    newline is forced so an epilogue ending in a heredoc terminator stays valid.
+    """
+    epilogue = exec_cfg.epilogue
+    return (
+        "\n# User-Supplied Epilogue\n" + epilogue.rstrip("\n") + "\n"
+        if epilogue else "\n# No epilogue specified\n"
+    )
+
+
 def warn_about_concurrency(config: AppConfig) -> None:
     """Flags configurations whose thread settings will oversubscribe the node.
 
@@ -535,6 +549,7 @@ def generate_slurm_script(
         "exec_sig_str": exec_sig_str,
         "exp_args_block": exp_args_block,
         "common_header": common_header,
+        "common_footer": build_common_footer(exec_cfg),
     }
 
     # 5. Clean Mode Routing via computed config properties

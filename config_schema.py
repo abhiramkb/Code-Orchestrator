@@ -139,6 +139,9 @@ class ExecutionConfig(BaseModel):
     modules: List[str] = Field(default_factory=list)
     env_vars: Dict[str, Any] = Field(default_factory=dict)
     preamble: Optional[str] = None
+    # Free-form bash run once every executable invocation in the script has finished.
+    # In array mode that is once per array element, mirroring the preamble.
+    epilogue: Optional[str] = None
     # Cores used by ONE invocation of the executable. When set, the inner loop runs
     # floor(SLURM_CPUS_PER_TASK / multithreading_level) iterations concurrently.
     # Omit it (the default) to keep the inner loop strictly sequential.

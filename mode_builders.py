@@ -476,7 +476,7 @@ print_args "$indicator" "{ctx['fixed_args_str']} $exp_args"
 }} > >(sed "s/^/[${{indicator}}_out] /") 2> >(sed "s/^/[${{indicator}}_err] /" >&2)
 
 wait
-"""
+{ctx['common_footer']}"""
 
 def _evaluate_tabular_rows(block: Union[TabularInnerLoop, TabularOuterLoop]) -> List[Dict[str, Any]]:
     """Expands a tabular loop block into one argument dictionary per retained row.
@@ -613,7 +613,7 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Args: {arg_names_display}"
 echo "Pending Tasks: {len(pending_tasks)} / {len(evaluated_inner)}"
 echo "================================================================"
-{inner_driver}"""
+{inner_driver}{ctx['common_footer']}"""
 
 def _evaluate_outer_block(block: OuterLoopBlock) -> List[Dict[str, Any]]:
     """Evaluates a typed outer loop block into argument dictionaries."""
@@ -781,5 +781,5 @@ echo "Fixed Args: {ctx['fixed_args_str']}"
 echo "Inner Args: {arg_names_display}"
 echo "Executing Subtasks: {len(pending_task_ids)} / {len(outer_combinations)} Outer Runs"
 echo "======================================================================"
-{inner_driver}"""
+{inner_driver}{ctx['common_footer']}"""
     return script_content, len(assignments)
